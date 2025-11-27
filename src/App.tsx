@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Layout, FileSpreadsheet, Settings, Printer, List, Upload, Trash2, Plus, ArrowRight } from 'lucide-react';
-import { parseExcelFile } from './services/excelService';
+import { Layout, FileSpreadsheet, Settings, Printer, List, Upload, Trash2, Plus, ArrowRight, Download } from 'lucide-react';
+import { parseExcelFile, exportUnscannedRecords } from './services/excelService';
 import { Batch, BatchRecord, Rule, ConditionOperator } from './types';
 import { Scanner } from './components/Scanner';
 
@@ -53,42 +53,95 @@ const App: React.FC = () => {
   }, [rules]);
 
   // --- Handlers ---
+  const processFile = async (file: File) => {
+    // Validate file type
+    const validExtensions = ['.xlsx', '.xls', '.csv'];
+    const fileExtension = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+
+    if (!validExtensions.includes(fileExtension)) {
+      throw new Error(`Unsupported file format. Please upload an Excel file (${validExtensions.join(', ')})`);
+    }
+
+    const { headers, data } = await parseExcelFile(file);
+
+    // Validate headers exist
+    if (!headers || headers.length === 0) {
+      throw new Error('File format error: Unable to read headers. Please ensure the first row of the Excel file contains column names.');
+    }
+
+    // Validate data exists
+    if (!data || data.length === 0) {
+      throw new Error('File content is empty. Please ensure the Excel file contains data rows.');
+    }
+
+    // Auto-detect PK (look for 'tracking', 'id', 'no', 'order')
+    const pk = headers.find(h => {
+      const lower = h.toLowerCase();
+      return lower.includes('tracking') ||
+             lower.includes('order') ||
+             lower.includes('id');
+    }) || headers[0];
+
+    // Validate that the primary key column has valid values
+    const validRecords = data.filter(row => {
+      const pkValue = row[pk];
+      return pkValue !== undefined && pkValue !== null && String(pkValue).trim() !== '';
+    });
+
+    if (validRecords.length === 0) {
+      throw new Error(`No valid data in primary key column "${pk}". Please ensure the first column contains order numbers or tracking numbers.`);
+    }
+
+    if (validRecords.length < data.length) {
+      const skipped = data.length - validRecords.length;
+      console.warn(`Skipped ${skipped} empty rows`);
+    }
+
+    const newBatch: Batch = {
+      id: crypto.randomUUID(),
+      name: file.name.replace(/\.[^/.]+$/, ""),
+      createdAt: new Date().toISOString(),
+      primaryKeyColumn: pk,
+      records: validRecords.map(row => ({
+        id: String(row[pk]),
+        data: row,
+        scanned: false
+      }))
+    };
+
+    return newBatch;
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
     setIsLoading(true);
     try {
       const file = e.target.files[0];
-      const { headers, data } = await parseExcelFile(file);
-      
-      // Auto-detect PK (look for 'tracking', 'id', 'no')
-      const pk = headers.find(h => h.toLowerCase().includes('tracking') || h.toLowerCase().includes('id')) || headers[0];
-
-      const newBatch: Batch = {
-        id: crypto.randomUUID(),
-        name: file.name.replace(/\.[^/.]+$/, ""),
-        createdAt: new Date().toISOString(),
-        primaryKeyColumn: pk,
-        records: data.map(row => ({
-          id: String(row[pk]),
-          data: row,
-          scanned: false
-        })).filter(r => r.id && r.id !== 'undefined') // Filter invalid
-      };
-
+      const newBatch = await processFile(file);
       setBatches(prev => [newBatch, ...prev]);
       setActiveBatchId(newBatch.id);
       setView('scan');
-    } catch (err) {
-      alert('Failed to parse Excel file. Please ensure it is a valid format.');
+    } catch (err: any) {
+      alert(err.message || 'File parsing failed. Please check the file format.');
       console.error(err);
     } finally {
       setIsLoading(false);
+      // Reset file input
+      e.target.value = '';
     }
   };
 
   const handleDeleteBatch = (id: string) => {
     setBatches(prev => prev.filter(b => b.id !== id));
     if (activeBatchId === id) setActiveBatchId(null);
+  };
+
+  const handleExportUnscanned = (batchId: string) => {
+    const batch = batches.find(b => b.id === batchId);
+    if (!batch) return;
+
+    const unscannedRecords = batch.records.filter(record => !record.scanned);
+    exportUnscannedRecords(unscannedRecords, batch.name);
   };
 
   const handleScan = (trackingNum: string): BatchRecord | null => {
@@ -137,6 +190,40 @@ const App: React.FC = () => {
     setRules(rules.filter(r => r.id !== id));
   };
 
+  // --- Drag and Drop Handlers ---
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy'; // Show copy cursor
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+
+    const file = files[0];
+    setIsLoading(true);
+    try {
+      const newBatch = await processFile(file);
+      setBatches(prev => [newBatch, ...prev]);
+      setActiveBatchId(newBatch.id);
+      setView('scan');
+    } catch (err: any) {
+      alert(err.message || 'File parsing failed. Please check the file format.');
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
 
   // --- Render Views ---
 
@@ -179,6 +266,14 @@ const App: React.FC = () => {
                             <p className="text-sm text-gray-500">PK: <span className="font-mono bg-gray-100 px-1 rounded">{batch.primaryKeyColumn}</span> • Created: {new Date(batch.createdAt).toLocaleDateString()}</p>
                         </div>
                         <div className="flex gap-2">
+                            <button
+                                onClick={() => handleExportUnscanned(batch.id)}
+                                className="text-green-600 hover:bg-green-50 px-3 py-1 rounded-lg text-sm font-medium transition-colors flex items-center gap-1"
+                                title="Export Unscanned Orders"
+                            >
+                                <Download size={16} />
+                                <span>Export Unscanned</span>
+                            </button>
                             {activeBatchId !== batch.id && (
                                 <button onClick={() => { setActiveBatchId(batch.id); setView('scan'); }} className="text-blue-600 hover:bg-blue-50 px-3 py-1 rounded-lg text-sm font-medium transition-colors">
                                     Select
@@ -347,7 +442,12 @@ const App: React.FC = () => {
             </div>
         </header>
 
-        <div className="h-[calc(100vh-4rem)]">
+        <div
+          className="h-[calc(100vh-4rem)]"
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+        >
              {view === 'scan' && (
                 <Scanner
                     activeBatch={activeBatch}

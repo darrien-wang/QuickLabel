@@ -114,15 +114,13 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
     );
   }
 
-  // Find priority fields (simple heuristic)
-  const keys = Object.keys(record.data);
-  const nameKey = keys.find(k => k.toLowerCase().includes('name') || k.toLowerCase().includes('recipient')) || keys[1] || 'Name';
-  const addrKey = keys.find(k => k.toLowerCase().includes('address') || k.toLowerCase().includes('street')) || keys[2] || 'Address';
-  const cityKey = keys.find(k => k.toLowerCase().includes('city')) || keys[3] || 'City';
-  
-  const recipientName = record.data[nameKey] || 'Unknown Recipient';
-  const address = record.data[addrKey] || '';
-  const city = record.data[cityKey] || '';
+  // Use Excel column references (A, B, C, D, E, ...)
+  // Users can map their Excel columns directly
+  const A = record.data['A'] || '';  // Column A
+  const B = record.data['B'] || '';  // Column B
+  const C = record.data['C'] || '';  // Column C
+  const D = record.data['D'] || '';  // Column D
+  const E = record.data['E'] || '';  // Column E
 
   return (
     <div
@@ -144,16 +142,15 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
           ))}
         </div>
         <div className="font-mono text-5xl font-black tracking-tighter">
-          EXP
+          {A||'A'}
         </div>
       </div>
 
       {/* Recipient Block */}
       <div className="border-b-4 border-black pb-4 mb-4">
-        <div className="text-sm text-gray-600 uppercase font-bold tracking-wider mb-1">Ship To:</div>
-        <h2 className="text-3xl font-bold leading-tight mb-2">{recipientName}</h2>
-        <p className="text-xl leading-snug">{address}</p>
-        <p className="text-xl leading-snug font-bold mt-1">{city}</p>
+        <h2 className="text-3xl font-bold leading-tight mb-2">{B||"B"}</h2>
+        <p className="text-xl leading-snug">{C||'C'}</p>
+        <p className="text-xl leading-snug font-bold mt-1">{D||'D'}</p>
       </div>
 
       {/* Details Grid */}
@@ -163,8 +160,8 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
            <div className="font-mono text-lg font-bold">{new Date().toLocaleDateString()}</div>
         </div>
         <div>
-           <div className="text-sm text-gray-600 uppercase font-bold tracking-wider">Weight</div>
-           <div className="font-mono text-lg font-bold">{record.data['Weight'] || '1.0'} KG</div>
+           <div className="text-sm text-gray-600 uppercase font-bold tracking-wider">Position</div>
+           <div className="font-mono text-lg font-bold">{E|| 'E'} </div>
         </div>
       </div>
 
@@ -177,10 +174,6 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
         
         <div className="flex justify-between w-full items-end">
           <div ref={qrRef} className="print-qr-fix"></div>
-          <div className="text-right">
-             <div className="text-sm font-bold">TRACKING #:</div>
-             <div className="text-2xl font-mono font-bold tracking-wider">{record.id}</div>
-          </div>
         </div>
       </div>
     </div>

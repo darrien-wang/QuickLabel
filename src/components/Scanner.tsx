@@ -66,6 +66,7 @@ export const Scanner: React.FC<ScannerProps> = ({
     } else {
       setError(`Tracking number "${inputVal}" not found in batch.`);
       setLastRecord(null);
+      setInputVal(''); // Clear input even on error so user can scan again
     }
   };
 

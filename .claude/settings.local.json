@@ -6,7 +6,8 @@
       "Bash(npx electron-builder:*)",
       "Bash(dir:*)",
       "Bash(npm run build:*)",
-      "Bash(npm start)"
+      "Bash(npm start)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []
