@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Layout, FileSpreadsheet, Settings, Printer, List, Upload, Trash2, Plus, ArrowRight, Download, Link as LinkIcon } from 'lucide-react';
 import { parseExcelFile, exportUnscannedRecords } from './services/excelService';
-import { fetchGoogleSheetsData, parseGoogleSheetsUrl, ServiceAccountCredentials, updateScanStatus } from './services/googleSheetsService';
-import { Batch, BatchRecord, Rule, ConditionOperator } from './types';
+import { fetchGoogleSheetsData, fetchAllGoogleSheetsData, parseGoogleSheetsUrl, ServiceAccountCredentials, updateScanStatus } from './services/googleSheetsService';
+import { Batch, BatchRecord, Rule, ConditionOperator, LabelFieldMapping } from './types';
 import { Scanner } from './components/Scanner';
 import { GoogleSheetsImportForm } from './components/GoogleSheetsImportForm';
+import { FieldMappingModal } from './components/FieldMappingModal';
 
 // Default Rules for Demo
 const DEFAULT_RULES: Rule[] = [
@@ -37,6 +38,8 @@ const App: React.FC = () => {
   const [labelScale, setLabelScale] = useState<number>(1.0);
   const [showGoogleSheetsModal, setShowGoogleSheetsModal] = useState(false);
   const [serviceAccountCredentials, setServiceAccountCredentials] = useState<ServiceAccountCredentials | null>(null);
+  const [showFieldMappingModal, setShowFieldMappingModal] = useState(false);
+  const [fieldMappingBatchId, setFieldMappingBatchId] = useState<string | null>(null);
 
   // --- Effects ---
   useEffect(() => {
@@ -74,11 +77,19 @@ const App: React.FC = () => {
     const intervalId = setInterval(async () => {
       console.log('Auto-refreshing Google Sheets...');
       try {
-        const sheetsData = await fetchGoogleSheetsData(
-          batch.googleSheetsConfig!.spreadsheetId,
-          batch.googleSheetsConfig!.sheetName,
-          serviceAccountCredentials
-        );
+        let sheetsData;
+        if (batch.googleSheetsConfig.importAllSheets) {
+          sheetsData = await fetchAllGoogleSheetsData(
+            batch.googleSheetsConfig.spreadsheetId,
+            serviceAccountCredentials
+          );
+        } else {
+          sheetsData = await fetchGoogleSheetsData(
+            batch.googleSheetsConfig.spreadsheetId,
+            batch.googleSheetsConfig.sheetName!,
+            serviceAccountCredentials
+          );
+        }
 
         const { headers, data } = sheetsData;
         const pk = batch.primaryKeyColumn;
@@ -104,7 +115,8 @@ const App: React.FC = () => {
                 return {
                   id: String(row[pk]),
                   data: row,
-                  scanned: isScanned
+                  scanned: !!row['ScannedAt'], // Check if ScannedAt has a value
+                  sheetName: row._sheetName || sheetsData.sheetName
                 };
               });
 
@@ -177,7 +189,8 @@ const App: React.FC = () => {
         id: String(row[pk]),
         data: row,
         scanned: false
-      }))
+      })),
+      rawData: data // Store original data for fixed cell references
     };
 
     return newBatch;
@@ -215,7 +228,72 @@ const App: React.FC = () => {
     exportUnscannedRecords(unscannedRecords, batch.name);
   };
 
-  const handleGoogleSheetsImport = async (sheetsUrl: string, sheetName: string) => {
+  const handleRefreshGoogleSheets = async (batchId: string) => {
+    const batch = batches.find(b => b.id === batchId);
+    if (!batch || batch.source !== 'google-sheets' || !batch.googleSheetsConfig || !serviceAccountCredentials) {
+      alert('只能刷新 Google Sheets 批次');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      let sheetsData;
+      if (batch.googleSheetsConfig.importAllSheets) {
+        sheetsData = await fetchAllGoogleSheetsData(
+          batch.googleSheetsConfig.spreadsheetId,
+          serviceAccountCredentials
+        );
+      } else {
+        sheetsData = await fetchGoogleSheetsData(
+          batch.googleSheetsConfig.spreadsheetId,
+          batch.googleSheetsConfig.sheetName!,
+          serviceAccountCredentials
+        );
+      }
+
+      const { headers, data } = sheetsData;
+      const pk = batch.primaryKeyColumn;
+
+      const validRecords = data.filter(row => {
+        const pkValue = row[pk];
+        return pkValue !== undefined && pkValue !== null && String(pkValue).trim() !== '';
+      });
+
+      if (validRecords.length > 0) {
+        setBatches(prev => prev.map(b => {
+          if (b.id === batchId) {
+            const newRecords = validRecords.map(row => ({
+              id: String(row[pk]),
+              data: row,
+              scanned: !!row['ScannedAt'],
+              sheetName: row._sheetName || sheetsData.sheetName
+            }));
+            return { ...b, records: newRecords };
+          }
+          return b;
+        }));
+        alert('刷新成功！');
+      }
+    } catch (err: any) {
+      alert(`刷新失败: ${err.message}`);
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleFieldMappingSave = (mapping: LabelFieldMapping) => {
+    if (!fieldMappingBatchId) return;
+
+    setBatches(prev => prev.map(b => {
+      if (b.id === fieldMappingBatchId) {
+        return { ...b, fieldMapping: mapping };
+      }
+      return b;
+    }));
+  };
+
+  const handleGoogleSheetsImport = async (sheetsUrl: string, sheetName: string, importAllSheets: boolean) => {
     setIsLoading(true);
     try {
       // Check if Service Account is configured
@@ -229,12 +307,20 @@ const App: React.FC = () => {
         throw new Error('无效的 Google Sheets 链接。请确保链接格式正确。');
       }
 
-      // Fetch data from Google Sheets using googleapis
-      const sheetsData = await fetchGoogleSheetsData(
-        spreadsheetId,
-        sheetName,
-        serviceAccountCredentials
-      );
+      let sheetsData;
+      if (importAllSheets) {
+        sheetsData = await fetchAllGoogleSheetsData(
+          spreadsheetId,
+          serviceAccountCredentials
+        );
+      } else {
+        // Fetch data from Google Sheets using googleapis
+        sheetsData = await fetchGoogleSheetsData(
+          spreadsheetId,
+          sheetName,
+          serviceAccountCredentials
+        );
+      }
 
       const { headers, data } = sheetsData;
       console.log('Imported Sheets Data:', { headers, data });
@@ -262,20 +348,23 @@ const App: React.FC = () => {
       // Create new batch from Google Sheets
       const newBatch: Batch = {
         id: crypto.randomUUID(),
-        name: `Google Sheets - ${new Date().toLocaleDateString()}`,
+        name: `${spreadsheetId.substring(0, 8)}...${importAllSheets ? ' (All Sheets)' : ` - ${sheetName}`}`,
         createdAt: new Date().toISOString(),
         primaryKeyColumn: pk,
         source: 'google-sheets',
         googleSheetsConfig: {
           spreadsheetId,
-          sheetName: sheetsData.sheetName,
-          url: sheetsUrl
+          sheetName: importAllSheets ? undefined : sheetName,
+          url: sheetsUrl,
+          importAllSheets
         },
         records: validRecords.map(row => ({
           id: String(row[pk]),
           data: row,
-          scanned: false
-        }))
+          scanned: false,
+          sheetName: row._sheetName || sheetsData.sheetName // Use sheet name from row (multi-sheet) or batch (single sheet)
+        })),
+        rawData: data // Store original data for fixed cell references
       };
 
       setBatches(prev => [newBatch, ...prev]);
@@ -313,10 +402,13 @@ const App: React.FC = () => {
         try {
           await updateScanStatus(
             batch.googleSheetsConfig.spreadsheetId,
-            batch.googleSheetsConfig.sheetName,
+            batch.records[recordIndex].sheetName || batch.googleSheetsConfig.sheetName || '',
             recordIndex,
             true,
-            serviceAccountCredentials
+            serviceAccountCredentials,
+            'ScannedAt',
+            trackingNum, // orderId
+            batch.primaryKeyColumn // primaryKeyColumn
           );
           console.log(`已同步扫描状态到 Google Sheets: ${trackingNum}`);
         } catch (err: any) {
@@ -462,6 +554,30 @@ const App: React.FC = () => {
                   </p>
                 </div>
                 <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setFieldMappingBatchId(batch.id);
+                      setShowFieldMappingModal(true);
+                    }}
+                    className="text-purple-600 hover:bg-purple-50 px-3 py-1 rounded-lg text-sm font-medium transition-colors flex items-center gap-1"
+                    title="Configure Label Fields"
+                  >
+                    <Settings size={16} />
+                    <span>Configure Fields</span>
+                  </button>
+                  {batch.source === 'google-sheets' && (
+                    <button
+                      onClick={() => handleRefreshGoogleSheets(batch.id)}
+                      className="text-blue-600 hover:bg-blue-50 px-3 py-1 rounded-lg text-sm font-medium transition-colors flex items-center gap-1"
+                      title="Refresh from Google Sheets"
+                      disabled={isLoading}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
+                      </svg>
+                      <span>Refresh</span>
+                    </button>
+                  )}
                   <button
                     onClick={() => handleExportUnscanned(batch.id)}
                     className="text-green-600 hover:bg-green-50 px-3 py-1 rounded-lg text-sm font-medium transition-colors flex items-center gap-1"
@@ -653,6 +769,8 @@ const App: React.FC = () => {
               autoPrint={autoPrint}
               labelScale={labelScale}
               onLabelScaleChange={setLabelScale}
+              fieldMapping={activeBatch?.fieldMapping || null}
+              rawData={activeBatch?.rawData}
             />
           )}
           {view === 'batches' && renderBatches()}
@@ -676,6 +794,24 @@ const App: React.FC = () => {
             />
           </div>
         </div>
+      )}
+
+      {/* Field Mapping Modal */}
+      {showFieldMappingModal && fieldMappingBatchId && (
+        <FieldMappingModal
+          isOpen={showFieldMappingModal}
+          onClose={() => {
+            setShowFieldMappingModal(false);
+            setFieldMappingBatchId(null);
+          }}
+          availableColumns={
+            batches.find(b => b.id === fieldMappingBatchId)?.records[0]
+              ? Object.keys(batches.find(b => b.id === fieldMappingBatchId)!.records[0].data)
+              : []
+          }
+          currentMapping={batches.find(b => b.id === fieldMappingBatchId)?.fieldMapping || null}
+          onSave={handleFieldMappingSave}
+        />
       )}
     </div>
   );

@@ -3,6 +3,15 @@ export interface BatchRecord {
   data: Record<string, any>; // The full row data
   scanned: boolean;
   scannedAt?: string;
+  sheetName?: string; // The sheet this record belongs to
+}
+
+export interface LabelFieldMapping {
+  stopNumber: string;      // Maps to top-right large number
+  recipientName: string;   // Maps to main recipient name
+  address: string;         // Maps to address line
+  phone: string;           // Maps to phone/contact
+  position: string;        // Maps to position/stop info
 }
 
 export interface Batch {
@@ -14,9 +23,12 @@ export interface Batch {
   source: 'local' | 'google-sheets'; // Data source type
   googleSheetsConfig?: {
     spreadsheetId: string;
-    sheetName: string;
+    sheetName?: string; // Optional if importing all sheets
     url: string;
+    importAllSheets?: boolean;
   };
+  fieldMapping?: LabelFieldMapping; // Column to label field mapping
+  rawData?: Record<string, any>[]; // Original data for fixed cell references
 }
 
 export interface FieldMapping {
@@ -75,6 +87,7 @@ declare global {
       printLabel: (imgData: string) => void;
       printHTML: (htmlContent: string) => void;
       fetchGoogleSheets: (params: { spreadsheetId: string; sheetName: string; credentials: any }) => Promise<any>;
+      fetchAllGoogleSheets: (params: { spreadsheetId: string; credentials: any }) => Promise<any>;
       updateScanStatus: (params: { spreadsheetId: string; sheetName: string; rowIndex: number; scanned: boolean; credentials: any; scannedColumnName?: string }) => Promise<{ success: boolean }>;
     };
   }

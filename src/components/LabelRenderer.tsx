@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { BatchRecord, Rule, ConditionOperator } from '../types';
+import { BatchRecord, Rule, ConditionOperator, LabelFieldMapping } from '../types';
 
 declare const JsBarcode: any;
 declare const QRCode: any;
@@ -10,14 +10,18 @@ interface LabelRendererProps {
   scale?: number; // Only affects the style transform for on-screen preview
   className?: string;
   id?: string;
+  fieldMapping?: LabelFieldMapping | null;
+  rawData?: Record<string, any>[]; // Original data for fixed cell references
 }
 
-export const LabelRenderer: React.FC<LabelRendererProps> = ({ 
-  record, 
-  rules, 
+export const LabelRenderer: React.FC<LabelRendererProps> = ({
+  record,
+  rules,
   scale = 1,
   className = "",
-  id
+  id,
+  fieldMapping,
+  rawData
 }) => {
   const barcodeRef = useRef<SVGSVGElement>(null);
   const qrRef = useRef<HTMLDivElement>(null);
@@ -25,9 +29,9 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
   // Derive badge logic from rules
   const badges = React.useMemo(() => {
     if (!record) return [];
-    
+
     const activeBadges: { text: string; color: string }[] = [];
-    
+
     rules.forEach(rule => {
       const cellValue = String(record.data[rule.column] || '').toLowerCase();
       const ruleValue = rule.value.toLowerCase();
@@ -44,7 +48,7 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
         activeBadges.push({ text: rule.action.payload, color: 'bg-black text-white' });
       }
     });
-    
+
     return activeBadges;
   }, [record, rules]);
 
@@ -57,7 +61,7 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
         // High density barcode for thermal printing
         JsBarcode(barcodeRef.current, record.id, {
           format: "CODE128",
-          width: 3, 
+          width: 3,
           height: 60,
           displayValue: true,
           margin: 0,
@@ -76,9 +80,9 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
           text: JSON.stringify(record.data),
           width: 90,
           height: 90,
-          colorDark : "#000000",
-          colorLight : "#ffffff",
-          correctLevel : 2 // H
+          colorDark: "#000000",
+          colorLight: "#ffffff",
+          correctLevel: 2 // H
         });
       } catch (e) {
         console.error("QR generation failed", e);
@@ -114,13 +118,45 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
     );
   }
 
-  // Use Excel column references (A, B, C, D, E, ...)
-  // Users can map their Excel columns directly
-  const A = record.data['A'] || '';  // Column A
-  const B = record.data['B'] || '';  // Column B
-  const C = record.data['C'] || '';  // Column C
-  const D = record.data['D'] || '';  // Column D
-  const E = record.data['E'] || '';  // Column E
+  // Helper function to get field value from mapping
+  // Supports: column names ("Order ID"), column letters ("B"), or cell references ("B2" for fixed value)
+  const getFieldValue = (mappingValue: string | undefined): string => {
+    if (!mappingValue || !record) return '';
+
+    // Check if it's a cell reference (e.g., "B2", "C1")
+    const cellRefMatch = mappingValue.match(/^([A-Z]+)(\d+)$/i);
+    if (cellRefMatch) {
+      const [, col, rowStr] = cellRefMatch;
+      const rowIndex = parseInt(rowStr, 10) - 1; // Convert to 0-based index
+
+      // Debug logging
+      console.log('Cell reference detected:', { mappingValue, col, rowStr, rowIndex });
+      console.log('rawData:', rawData);
+      console.log('rawData[rowIndex]:', rawData?.[rowIndex]);
+
+      // If rawData is available and the row exists, use the fixed value
+      if (rawData && rawData[rowIndex]) {
+        const value = rawData[rowIndex][col.toUpperCase()] || '';
+        console.log('Fixed value from rawData:', value);
+        return value;
+      }
+
+      // Fallback: treat as column reference (use current record's value)
+      const fallbackValue = record.data[col.toUpperCase()] || '';
+      console.log('Fallback value from record:', fallbackValue);
+      return fallbackValue;
+    }
+
+    // Otherwise, treat it as a column name or column letter
+    return record.data[mappingValue] || '';
+  };
+
+  // Get field values using field mapping or fallback to A/B/C/D/E
+  const stopNumber = fieldMapping?.stopNumber ? getFieldValue(fieldMapping.stopNumber) : record.data['A'] || '';
+  const recipientName = fieldMapping?.recipientName ? getFieldValue(fieldMapping.recipientName) : record.data['B'] || '';
+  const address = fieldMapping?.address ? getFieldValue(fieldMapping.address) : record.data['C'] || '';
+  const phone = fieldMapping?.phone ? getFieldValue(fieldMapping.phone) : record.data['D'] || '';
+  const position = fieldMapping?.position ? getFieldValue(fieldMapping.position) : record.data['E'] || '';
 
   return (
     <div
@@ -142,26 +178,26 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
           ))}
         </div>
         <div className="font-mono text-5xl font-black tracking-tighter">
-          {A||'A'}
+          {stopNumber || 'N/A'}
         </div>
       </div>
 
       {/* Recipient Block */}
       <div className="border-b-4 border-black pb-4 mb-4">
-        <h2 className="text-3xl font-bold leading-tight mb-2">{B||"B"}</h2>
-        <p className="text-xl leading-snug">{C||'C'}</p>
-        <p className="text-xl leading-snug font-bold mt-1">{D||'D'}</p>
+        <h2 className="text-3xl font-bold leading-tight mb-2">{recipientName || "No Name"}</h2>
+        <p className="text-xl leading-snug">{address || 'No Address'}</p>
+        <p className="text-xl leading-snug font-bold mt-1">{phone || 'No Phone'}</p>
       </div>
 
       {/* Details Grid */}
       <div className="grid grid-cols-2 gap-4 mb-auto">
         <div>
-           <div className="text-sm text-gray-600 uppercase font-bold tracking-wider">Date</div>
-           <div className="font-mono text-lg font-bold">{new Date().toLocaleDateString()}</div>
+          <div className="text-sm text-gray-600 uppercase font-bold tracking-wider">Date</div>
+          <div className="font-mono text-lg font-bold">{new Date().toLocaleDateString()}</div>
         </div>
         <div>
-           <div className="text-sm text-gray-600 uppercase font-bold tracking-wider">Position</div>
-           <div className="font-mono text-lg font-bold">{E|| 'E'} </div>
+          <div className="text-sm text-gray-600 uppercase font-bold tracking-wider">Position</div>
+          <div className="font-mono text-lg font-bold">{position || 'N/A'} </div>
         </div>
       </div>
 
@@ -171,7 +207,7 @@ export const LabelRenderer: React.FC<LabelRendererProps> = ({
         <div className="w-full flex justify-center mb-4">
           <svg ref={barcodeRef} className="max-w-full h-20"></svg>
         </div>
-        
+
         <div className="flex justify-between w-full items-end">
           <div ref={qrRef} className="print-qr-fix"></div>
         </div>

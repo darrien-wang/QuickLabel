@@ -59,16 +59,42 @@ export const fetchGoogleSheetsData = async (
 };
 
 /**
+ * Fetch data from ALL sheets in a Google Spreadsheet
+ */
+export const fetchAllGoogleSheetsData = async (
+  spreadsheetId: string,
+  credentials: ServiceAccountCredentials
+): Promise<SheetsData> => {
+  if (!window.electronAPI?.fetchAllGoogleSheets) {
+    throw new Error('Electron API not available.');
+  }
+
+  try {
+    const result = await window.electronAPI.fetchAllGoogleSheets({
+      spreadsheetId,
+      credentials
+    });
+
+    return result;
+  } catch (err: any) {
+    console.error('fetchAllGoogleSheetsData error:', err);
+    throw new Error(`连接 Google Sheets 失败: ${err.message}`);
+  }
+};
+
+/**
  * Update scan status in Google Sheets
  * Marks a specific row as scanned
  */
 export const updateScanStatus = async (
   spreadsheetId: string,
   sheetName: string,
-  rowIndex: number, // 0-based data index (excluding header)
+  rowIndex: number, // 0-based data index (excluding header) - deprecated, use orderId instead
   scanned: boolean,
   credentials: ServiceAccountCredentials,
-  scannedColumnName: string = 'Scanned' // Column name to update
+  scannedColumnName: string = 'ScannedAt', // Column name to update
+  orderId?: string, // The actual Order ID to search for
+  primaryKeyColumn?: string // The primary key column name
 ): Promise<void> => {
   if (!window.electronAPI?.updateScanStatus) {
     throw new Error('Electron API not available. This feature only works in the Electron app.');
@@ -81,10 +107,12 @@ export const updateScanStatus = async (
       rowIndex,
       scanned,
       credentials,
-      scannedColumnName
+      scannedColumnName,
+      orderId,
+      primaryKeyColumn
     });
 
-    console.log(`✅ 已同步扫描状态到 Google Sheets: 行 ${rowIndex + 2}, 状态: ${scanned ? 'YES' : 'NO'}`);
+    console.log(`✅ 已同步扫描状态到 Google Sheets: Order ID: ${orderId}`);
   } catch (err: any) {
     console.error(`❌ 更新扫描状态失败:`, err);
     throw new Error(`更新 Google Sheets 失败: ${err.message}`);

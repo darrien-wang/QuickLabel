@@ -3,7 +3,7 @@ import { Link as LinkIcon, AlertCircle, Upload } from 'lucide-react';
 import { ServiceAccountCredentials } from '../services/googleSheetsService';
 
 interface GoogleSheetsImportFormProps {
-  onImport: (url: string, sheetName: string) => void;
+  onImport: (url: string, sheetName: string, importAllSheets: boolean) => void;
   onCancel: () => void;
   isLoading: boolean;
   serviceAccountCredentials: ServiceAccountCredentials | null;
@@ -19,12 +19,16 @@ export const GoogleSheetsImportForm: React.FC<GoogleSheetsImportFormProps> = ({
 }) => {
   const [sheetsUrl, setSheetsUrl] = useState('');
   const [sheetName, setSheetName] = useState('Sheet1');
+  const [importAllSheets, setImportAllSheets] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    e.preventDefault();
-    if (sheetsUrl.trim() && sheetName.trim()) {
-      onImport(sheetsUrl.trim(), sheetName.trim());
+    if (sheetsUrl.trim()) {
+      if (importAllSheets) {
+        onImport(sheetsUrl.trim(), '', true);
+      } else if (sheetName.trim()) {
+        onImport(sheetsUrl.trim(), sheetName.trim(), false);
+      }
     }
   };
 
@@ -87,18 +91,30 @@ export const GoogleSheetsImportForm: React.FC<GoogleSheetsImportFormProps> = ({
 
       {/* Sheet Name Input */}
       <div>
-        <label className="block text-sm font-semibold text-gray-700 mb-2">
-          Sheet Name
-        </label>
+        <div className="flex justify-between items-center mb-2">
+          <label className="block text-sm font-semibold text-gray-700">
+            Sheet Name
+          </label>
+          <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+            <input
+              type="checkbox"
+              className="rounded border-gray-300 text-green-600 focus:ring-green-500"
+              checked={importAllSheets}
+              onChange={(e) => setImportAllSheets(e.target.checked)}
+              disabled={isLoading}
+            />
+            Import All Sheets
+          </label>
+        </div>
         <div className="relative">
           <input
             type="text"
-            className="w-full px-4 py-3 text-base bg-gray-50 border-2 border-gray-200 rounded-xl focus:border-green-500 focus:ring-0 transition-colors"
+            className={`w-full px-4 py-3 text-base bg-gray-50 border-2 border-gray-200 rounded-xl focus:border-green-500 focus:ring-0 transition-colors ${importAllSheets ? 'opacity-50 cursor-not-allowed' : ''}`}
             placeholder="e.g. Sheet1"
             value={sheetName}
             onChange={(e) => setSheetName(e.target.value)}
-            required
-            disabled={isLoading}
+            required={!importAllSheets}
+            disabled={isLoading || importAllSheets}
           />
         </div>
       </div>
@@ -148,7 +164,7 @@ export const GoogleSheetsImportForm: React.FC<GoogleSheetsImportFormProps> = ({
         </button>
         <button
           type="submit"
-          disabled={isLoading || !sheetsUrl.trim() || !sheetName.trim()}
+          disabled={isLoading || !sheetsUrl.trim() || (!importAllSheets && !sheetName.trim())}
           className="flex-1 px-4 py-3 text-white bg-green-600 hover:bg-green-700 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isLoading ? 'Importing...' : 'Import Data'}

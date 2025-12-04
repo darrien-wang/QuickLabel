@@ -262,8 +262,107 @@ ipcMain.handle('fetch-google-sheets', async (event, { spreadsheetId, sheetName, 
   }
 });
 
+// IPC Handler: Fetch All Google Sheets Data
+ipcMain.handle('fetch-all-google-sheets', async (event, { spreadsheetId, credentials }) => {
+  try {
+    const auth = new google.auth.GoogleAuth({
+      credentials: credentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    // 1. Get spreadsheet metadata to find all sheets
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId,
+    });
+
+    const sheetList = meta.data.sheets || [];
+    if (sheetList.length === 0) {
+      throw new Error('Spreadsheet contains no sheets');
+    }
+
+    let allData = [];
+    let combinedHeaders = null;
+
+    console.log(`Found ${sheetList.length} sheets. Fetching data...`);
+
+    // 2. Iterate and fetch data for each sheet
+    for (const sheet of sheetList) {
+      const sheetName = sheet.properties.title;
+      console.log(`Fetching sheet: ${sheetName}`);
+
+      try {
+        const range = `'${sheetName}'!A1:ZZ`;
+        const response = await sheets.spreadsheets.values.get({
+          spreadsheetId,
+          range,
+        });
+
+        const values = response.data.values || [];
+        if (values.length === 0) continue;
+
+        // Header detection (reuse logic)
+        let headerRowIndex = 0;
+        let headers = [];
+        const headerKeywords = ['order id', 'tracking', 'stop number', '订单', 'id', 'customer'];
+
+        const foundHeaderIndex = values.findIndex((row, index) => {
+          if (index > 20) return false;
+          const rowString = row.join(' ').toLowerCase();
+          return headerKeywords.some(keyword => rowString.includes(keyword));
+        });
+
+        if (foundHeaderIndex !== -1) {
+          headerRowIndex = foundHeaderIndex;
+          headers = values[headerRowIndex];
+        } else {
+          headers = values[0];
+        }
+
+        // Use the first valid headers found as the "master" headers for the batch
+        if (!combinedHeaders && headers.length > 0) {
+          combinedHeaders = headers;
+        }
+
+        const dataRows = values.slice(headerRowIndex + 1);
+
+        // Map to objects
+        const sheetData = dataRows.map(row => {
+          const obj = { _sheetName: sheetName }; // Tag with sheet name
+          headers.forEach((header, index) => {
+            obj[header] = row[index] || '';
+          });
+          return obj;
+        });
+
+        allData = [...allData, ...sheetData];
+
+      } catch (sheetErr) {
+        console.error(`Failed to fetch sheet ${sheetName}:`, sheetErr);
+        // Continue to next sheet
+      }
+    }
+
+    if (allData.length === 0) {
+      throw new Error('No data found in any sheets');
+    }
+
+    return {
+      headers: combinedHeaders || [],
+      data: allData,
+      spreadsheetId,
+      isMultiSheet: true
+    };
+
+  } catch (err) {
+    console.error('Fetch All Google Sheets error:', err);
+    throw new Error(`连接 Google Sheets 失败: ${err.message}`);
+  }
+});
+
 // IPC Handler: Update Scan Status in Google Sheets
-ipcMain.handle('update-scan-status', async (event, { spreadsheetId, sheetName, rowIndex, scanned, credentials, scannedColumnName = 'Scanned' }) => {
+ipcMain.handle('update-scan-status', async (event, { spreadsheetId, sheetName, rowIndex, scanned, credentials, scannedColumnName = 'ScannedAt', orderId, primaryKeyColumn }) => {
   try {
     // 使用 GoogleAuth 创建认证实例
     const auth = new google.auth.GoogleAuth({
@@ -273,21 +372,56 @@ ipcMain.handle('update-scan-status', async (event, { spreadsheetId, sheetName, r
 
     const sheets = google.sheets({ version: 'v4', auth });
 
-    // Get header row to find the column index
-    const headerResponse = await sheets.spreadsheets.values.get({
+    // Get all data from the sheet to find the correct row
+    const range = `'${sheetName}'!A1:ZZ`;
+    const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${sheetName}!1:1`,
+      range,
     });
 
-    const headers = headerResponse.data.values?.[0] || [];
-    let scannedColIndex = headers.findIndex((h) => h === scannedColumnName);
+    const values = response.data.values || [];
+    if (values.length === 0) {
+      throw new Error('Sheet is empty');
+    }
 
-    // If column doesn't exist, add it
-    if (scannedColIndex === -1) {
-      scannedColIndex = headers.length;
+    // Find header row
+    const headerKeywords = ['order id', 'tracking', 'stop number', '订单', 'id', 'customer'];
+    const foundHeaderIndex = values.findIndex((row, index) => {
+      if (index > 20) return false;
+      const rowString = row.join(' ').toLowerCase();
+      return headerKeywords.some(keyword => rowString.includes(keyword));
+    });
+
+    const headerRowIndex = foundHeaderIndex !== -1 ? foundHeaderIndex : 0;
+    const headers = values[headerRowIndex];
+
+    // Find the primary key column index
+    const pkColIndex = headers.findIndex(h => h === primaryKeyColumn);
+    if (pkColIndex === -1) {
+      throw new Error(`Primary key column "${primaryKeyColumn}" not found`);
+    }
+
+    // Find the row with matching Order ID
+    let targetRowIndex = -1;
+    for (let i = headerRowIndex + 1; i < values.length; i++) {
+      if (values[i][pkColIndex] === orderId) {
+        targetRowIndex = i;
+        break;
+      }
+    }
+
+    if (targetRowIndex === -1) {
+      throw new Error(`Order ID "${orderId}" not found in sheet`);
+    }
+
+    // Find or create ScannedAt column
+    let scannedAtColIndex = headers.findIndex((h) => h === scannedColumnName);
+
+    if (scannedAtColIndex === -1) {
+      scannedAtColIndex = headers.length;
       await sheets.spreadsheets.values.update({
         spreadsheetId,
-        range: `${sheetName}!${getColumnLetter(scannedColIndex)}1`,
+        range: `'${sheetName}'!${getColumnLetter(scannedAtColIndex)}${headerRowIndex + 1}`,
         valueInputOption: 'RAW',
         requestBody: {
           values: [[scannedColumnName]],
@@ -295,48 +429,20 @@ ipcMain.handle('update-scan-status', async (event, { spreadsheetId, sheetName, r
       });
     }
 
-    // Update the cell
-    const cellRow = rowIndex + 2; // +1 for header, +1 for 1-based index
-    const cellRange = `${sheetName}!${getColumnLetter(scannedColIndex)}${cellRow}`;
+    // Update the ScannedAt cell with timestamp
+    const cellRow = targetRowIndex + 1; // Convert to 1-based index
+    const cellRange = `'${sheetName}'!${getColumnLetter(scannedAtColIndex)}${cellRow}`;
 
     await sheets.spreadsheets.values.update({
       spreadsheetId,
       range: cellRange,
       valueInputOption: 'RAW',
       requestBody: {
-        values: [[scanned ? 'YES' : 'NO']],
+        values: [[scanned ? new Date().toISOString() : '']],
       },
     });
 
-    // Optionally update ScannedAt column
-    if (scanned) {
-      const scannedAtColName = 'ScannedAt';
-      let scannedAtColIndex = headers.findIndex((h) => h === scannedAtColName);
-
-      if (scannedAtColIndex === -1) {
-        scannedAtColIndex = headers.length + 1;
-        await sheets.spreadsheets.values.update({
-          spreadsheetId,
-          range: `${sheetName}!${getColumnLetter(scannedAtColIndex)}1`,
-          valueInputOption: 'RAW',
-          requestBody: {
-            values: [[scannedAtColName]],
-          },
-        });
-      }
-
-      const timeRange = `${sheetName}!${getColumnLetter(scannedAtColIndex)}${cellRow}`;
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: timeRange,
-        valueInputOption: 'RAW',
-        requestBody: {
-          values: [[new Date().toISOString()]],
-        },
-      });
-    }
-
-    console.log(`✅ 已同步扫描状态到 Google Sheets: 行 ${cellRow}, 状态: ${scanned ? 'YES' : 'NO'}`);
+    console.log(`✅ 已同步扫描时间到 Google Sheets: 行 ${cellRow}, Order ID: ${orderId}, 时间: ${scanned ? new Date().toISOString() : '清空'}`);
     return { success: true };
   } catch (err) {
     console.error(`❌ 更新扫描状态失败:`, err);
