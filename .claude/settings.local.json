@@ -7,7 +7,11 @@
       "Bash(dir:*)",
       "Bash(npm run build:*)",
       "Bash(npm start)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(npm run dev:electron:*)",
+      "Bash(npm run:*)",
+      "Bash(npm install:*)",
+      "Bash(taskkill:*)"
     ],
     "deny": [],
     "ask": []

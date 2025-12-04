@@ -11,6 +11,12 @@ export interface Batch {
   createdAt: string;
   records: BatchRecord[];
   primaryKeyColumn: string;
+  source: 'local' | 'google-sheets'; // Data source type
+  googleSheetsConfig?: {
+    spreadsheetId: string;
+    sheetName: string;
+    url: string;
+  };
 }
 
 export interface FieldMapping {
@@ -67,6 +73,9 @@ declare global {
   interface Window {
     electronAPI?: {
       printLabel: (imgData: string) => void;
+      printHTML: (htmlContent: string) => void;
+      fetchGoogleSheets: (params: { spreadsheetId: string; sheetName: string; credentials: any }) => Promise<any>;
+      updateScanStatus: (params: { spreadsheetId: string; sheetName: string; rowIndex: number; scanned: boolean; credentials: any; scannedColumnName?: string }) => Promise<{ success: boolean }>;
     };
   }
 }

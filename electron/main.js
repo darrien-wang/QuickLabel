@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const ptp = require('pdf-to-printer');
+const { google } = require('googleapis');
 
 let mainWindow;
 
@@ -181,6 +182,179 @@ ipcMain.on('print-html', async (event, htmlContent) => {
     }
   }
 });
+
+//  === Google Sheets IPC Handlers ===
+
+// IPC Handler: Fetch Google Sheets Data
+ipcMain.handle('fetch-google-sheets', async (event, { spreadsheetId, sheetName, credentials }) => {
+  try {
+    // 使用 GoogleAuth 创建认证实例
+    const auth = new google.auth.GoogleAuth({
+      credentials: credentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    const sheets = google.sheets({ version: 'v4', auth });
+    // Wrap sheet name in single quotes to handle spaces and special characters
+    const range = `'${sheetName}'!A1:ZZ`;
+    console.log('Fetching Google Sheets:', { spreadsheetId, sheetName, range });
+
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range,
+    });
+
+    const values = response.data.values || [];
+
+    console.log('Raw Google Sheets Values:', {
+      length: values.length,
+      firstRow: values[0],
+      secondRow: values[1]
+    });
+
+    if (values.length === 0) {
+      throw new Error('Google Sheets 中没有数据');
+    }
+
+    // Find header row
+    let headerRowIndex = 0;
+    let headers = [];
+
+    // Scan first 20 rows for a valid header
+    const headerKeywords = ['order id', 'tracking', 'stop number', '订单', 'id', 'customer'];
+
+    const foundHeaderIndex = values.findIndex((row, index) => {
+      if (index > 20) return false; // Limit scan depth
+      const rowString = row.join(' ').toLowerCase();
+      return headerKeywords.some(keyword => rowString.includes(keyword));
+    });
+
+    if (foundHeaderIndex !== -1) {
+      headerRowIndex = foundHeaderIndex;
+      headers = values[headerRowIndex];
+      console.log(`Found headers at row ${headerRowIndex + 1}:`, headers);
+    } else {
+      // Fallback to first row
+      headers = values[0];
+      console.log('Could not detect header row, using first row');
+    }
+
+    const dataRows = values.slice(headerRowIndex + 1);
+
+    // Convert to structured data
+    const structuredData = dataRows.map((row) => {
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header] = row[index] || '';
+      });
+      return obj;
+    });
+
+    return {
+      headers,
+      data: structuredData,
+      spreadsheetId,
+      sheetName,
+    };
+  } catch (err) {
+    console.error('Fetch Google Sheets error:', err);
+    throw new Error(`连接 Google Sheets 失败: ${err.message}`);
+  }
+});
+
+// IPC Handler: Update Scan Status in Google Sheets
+ipcMain.handle('update-scan-status', async (event, { spreadsheetId, sheetName, rowIndex, scanned, credentials, scannedColumnName = 'Scanned' }) => {
+  try {
+    // 使用 GoogleAuth 创建认证实例
+    const auth = new google.auth.GoogleAuth({
+      credentials: credentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    // Get header row to find the column index
+    const headerResponse = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!1:1`,
+    });
+
+    const headers = headerResponse.data.values?.[0] || [];
+    let scannedColIndex = headers.findIndex((h) => h === scannedColumnName);
+
+    // If column doesn't exist, add it
+    if (scannedColIndex === -1) {
+      scannedColIndex = headers.length;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${sheetName}!${getColumnLetter(scannedColIndex)}1`,
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [[scannedColumnName]],
+        },
+      });
+    }
+
+    // Update the cell
+    const cellRow = rowIndex + 2; // +1 for header, +1 for 1-based index
+    const cellRange = `${sheetName}!${getColumnLetter(scannedColIndex)}${cellRow}`;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: cellRange,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [[scanned ? 'YES' : 'NO']],
+      },
+    });
+
+    // Optionally update ScannedAt column
+    if (scanned) {
+      const scannedAtColName = 'ScannedAt';
+      let scannedAtColIndex = headers.findIndex((h) => h === scannedAtColName);
+
+      if (scannedAtColIndex === -1) {
+        scannedAtColIndex = headers.length + 1;
+        await sheets.spreadsheets.values.update({
+          spreadsheetId,
+          range: `${sheetName}!${getColumnLetter(scannedAtColIndex)}1`,
+          valueInputOption: 'RAW',
+          requestBody: {
+            values: [[scannedAtColName]],
+          },
+        });
+      }
+
+      const timeRange = `${sheetName}!${getColumnLetter(scannedAtColIndex)}${cellRow}`;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: timeRange,
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [[new Date().toISOString()]],
+        },
+      });
+    }
+
+    console.log(`✅ 已同步扫描状态到 Google Sheets: 行 ${cellRow}, 状态: ${scanned ? 'YES' : 'NO'}`);
+    return { success: true };
+  } catch (err) {
+    console.error(`❌ 更新扫描状态失败:`, err);
+    throw new Error(`更新 Google Sheets 失败: ${err.message}`);
+  }
+});
+
+/**
+ * Convert column index to letter (0 -> A, 1 -> B, 26 -> AA, etc.)
+ */
+function getColumnLetter(index) {
+  let letter = '';
+  while (index >= 0) {
+    letter = String.fromCharCode((index % 26) + 65) + letter;
+    index = Math.floor(index / 26) - 1;
+  }
+  return letter;
+}
 
 app.whenReady().then(createWindow);
 

@@ -6,7 +6,7 @@ import { LabelRenderer } from './LabelRenderer';
 interface ScannerProps {
   activeBatch: Batch | null;
   rules: Rule[];
-  onScan: (trackingNumber: string) => BatchRecord | null;
+  onScan: (trackingNumber: string) => BatchRecord | null | Promise<BatchRecord | null>;
   onClearHistory: () => void;
   autoPrint: boolean;
   labelScale: number;
@@ -46,7 +46,7 @@ export const Scanner: React.FC<ScannerProps> = ({
     }
   }, [lastRecord, autoPrint]);
 
-  const handleScan = (e: React.FormEvent) => {
+  const handleScan = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputVal.trim()) return;
 
@@ -55,7 +55,7 @@ export const Scanner: React.FC<ScannerProps> = ({
       return;
     }
 
-    const result = onScan(inputVal.trim());
+    const result = await Promise.resolve(onScan(inputVal.trim()));
 
     if (result) {
       setError(null);
