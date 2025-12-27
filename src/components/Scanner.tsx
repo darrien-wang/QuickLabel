@@ -58,13 +58,14 @@ export const Scanner: React.FC<ScannerProps> = ({
   // Load Printers and Restore Selection
   useEffect(() => {
     const loadPrinters = async () => {
-      // Small delay to ensure Electron API is ready
-      await new Promise(resolve => setTimeout(resolve, 500));
+      console.log("Scanner: Attempting to load printers...");
 
       if (window.electronAPI?.getPrinters) {
         try {
           const printerList = await window.electronAPI.getPrinters();
-          if (printerList && printerList.length > 0) {
+          console.log("Scanner: Received printers:", printerList);
+
+          if (Array.isArray(printerList) && printerList.length > 0) {
             setPrinters(printerList);
 
             // Try to restore saved printer
@@ -77,17 +78,15 @@ export const Scanner: React.FC<ScannerProps> = ({
               else setSelectedPrinter(printerList[0].name);
             }
           } else {
-            // No printers found
+            console.warn("Scanner: Printer list is empty");
             setPrinters([{ name: 'System Default', isDefault: true }]);
           }
         } catch (err) {
-          console.error("Failed to load printers:", err);
-          // Fallback
+          console.error("Scanner: Failed to load printers:", err);
           setPrinters([{ name: 'System Default', isDefault: true }]);
         }
       } else {
-        // API missing (likely needs restart)
-        console.warn("getPrinters not found");
+        console.error("Scanner: window.electronAPI.getPrinters is not defined. Bridge failure?");
         setPrinters([{ name: 'System Default', isDefault: true }]);
       }
     };

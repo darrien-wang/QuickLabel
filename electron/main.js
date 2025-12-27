@@ -190,12 +190,19 @@ ipcMain.on('print-label', (event, imgData) => {
 // IPC Handler: Get Printers
 ipcMain.handle('get-printers', async () => {
   try {
-    const printers = await ptp.getPrinters();
+    // Use Electron's native API which is more reliable for the renderer's perspective
+    if (!mainWindow) return [];
+    const printers = await mainWindow.webContents.getPrintersAsync();
     return printers;
   } catch (error) {
-    // Suppress verbose error in dev environment if no printers found or permission issue
-    // console.warn('Warning: Failed to fetch printers.');
-    return [];
+    console.error('Error fetching printers via Electron:', error);
+    // Fallback to pdf-to-printer if native fails or returns nothing useful
+    try {
+      const printers = await ptp.getPrinters();
+      return printers;
+    } catch (ptpError) {
+      return [];
+    }
   }
 });
 
