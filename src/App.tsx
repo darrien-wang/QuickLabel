@@ -7,6 +7,8 @@ import { Scanner } from './components/Scanner';
 import { GoogleSheetsImportForm } from './components/GoogleSheetsImportForm';
 import { FieldMappingModal } from './components/FieldMappingModal';
 
+import { SyncPanel } from './components/SyncPanel';
+
 // Default Rules for Demo
 const DEFAULT_RULES: Rule[] = [
   {
@@ -40,6 +42,7 @@ const App: React.FC = () => {
   const [serviceAccountCredentials, setServiceAccountCredentials] = useState<ServiceAccountCredentials | null>(null);
   const [showFieldMappingModal, setShowFieldMappingModal] = useState(false);
   const [fieldMappingBatchId, setFieldMappingBatchId] = useState<string | null>(null);
+  const [syncMode, setSyncMode] = useState<'standalone' | 'host' | 'client'>('standalone');
 
   // --- Effects ---
   useEffect(() => {
@@ -47,9 +50,12 @@ const App: React.FC = () => {
     const savedBatches = localStorage.getItem('ql_batches');
     const savedRules = localStorage.getItem('ql_rules');
     const savedServiceAccount = localStorage.getItem('ql_service_account');
+    const savedActiveBatchId = localStorage.getItem('ql_active_batch_id');
+
     if (savedBatches) setBatches(JSON.parse(savedBatches));
     if (savedRules) setRules(JSON.parse(savedRules));
     if (savedServiceAccount) setServiceAccountCredentials(JSON.parse(savedServiceAccount));
+    if (savedActiveBatchId) setActiveBatchId(savedActiveBatchId);
 
     // Listen for sync-before-close event from Electron
     if (window.electronAPI?.onSyncBeforeClose) {
@@ -65,7 +71,101 @@ const App: React.FC = () => {
 
       window.electronAPI.onSyncBeforeClose(handleSyncBeforeClose);
     }
+
   }, []);
+
+  // --- LAN Sync Effects ---
+  const batchesRef = React.useRef(batches);
+  const activeBatchIdRef = React.useRef(activeBatchId);
+
+  useEffect(() => {
+    batchesRef.current = batches;
+  }, [batches]);
+
+  useEffect(() => {
+    activeBatchIdRef.current = activeBatchId;
+
+    // Auto-select helper: if there's exactly one batch and none is active, select it
+    if (!activeBatchId && batches.length === 1 && syncMode === 'standalone') {
+      setActiveBatchId(batches[0].id);
+    }
+  }, [activeBatchId, batches, syncMode]);
+
+  useEffect(() => {
+    if (!window.electronAPI) return;
+
+    // Host: Client requests data
+    window.electronAPI.onSyncDataRequest((socketId) => {
+      console.log('Sending sync data (batches and activeBatchId) to client...');
+      window.electronAPI!.sendSyncData(socketId, batchesRef.current, activeBatchIdRef.current);
+    });
+
+    // Host: Received scan from client
+    window.electronAPI.onRemoteScan((data) => {
+      console.log('Received remote scan:', data);
+      const { batchId, trackingNumber, scannerName } = data;
+
+      // Update local state (Host is the source of truth)
+      setBatches(prev => prev.map(b => {
+        if (b.id === batchId) {
+          const recordIndex = b.records.findIndex(r => r.id === trackingNumber);
+          if (recordIndex >= 0 && !b.records[recordIndex].scanned) {
+            const newRecords = [...b.records];
+            const scannedAt = data.scannedAt || new Date().toISOString();
+            newRecords[recordIndex] = { ...newRecords[recordIndex], scanned: true, scannedAt };
+
+            // Broadcast the update to all clients
+            window.electronAPI!.broadcastScan({
+              batchId,
+              trackingNumber,
+              scannedAt,
+              scannerName
+            });
+
+            return { ...b, records: newRecords };
+          }
+        }
+        return b;
+      }));
+    });
+
+    // Client: Received full sync data
+    window.electronAPI.onSyncDataReceived((data) => {
+      console.log('Received sync data from host, updating local state:', data);
+      const { batches: newBatches, activeBatchId: hostActiveBatchId } = data;
+      setBatches(newBatches);
+
+      if (hostActiveBatchId) {
+        setActiveBatchId(hostActiveBatchId);
+        setView('scan'); // Automatically switch to scan view when host has an active batch
+      } else {
+        // If host has no active batch, but we have some, check if current selection is still in the new list
+        if (activeBatchIdRef.current && !newBatches.find((b: any) => b.id === activeBatchIdRef.current)) {
+          setActiveBatchId(null);
+        }
+      }
+    });
+
+    // Client: Received scan update broadcast
+    window.electronAPI.onRemoteScanUpdate((data) => {
+      console.log('Received scan update broadcast:', data);
+      const { batchId, trackingNumber, scannedAt } = data;
+
+      setBatches(prev => prev.map(b => {
+        if (b.id === batchId) {
+          const recordIndex = b.records.findIndex(r => r.id === trackingNumber);
+          if (recordIndex >= 0) {
+            const newRecords = [...b.records];
+            newRecords[recordIndex] = { ...newRecords[recordIndex], scanned: true, scannedAt };
+            return { ...b, records: newRecords };
+          }
+        }
+        return b;
+      }));
+    });
+
+  }, []); // Run once on mount
+
 
   useEffect(() => {
     // Save state
@@ -82,15 +182,23 @@ const App: React.FC = () => {
     }
   }, [serviceAccountCredentials]);
 
+  useEffect(() => {
+    if (activeBatchId) {
+      localStorage.setItem('ql_active_batch_id', activeBatchId);
+    } else {
+      localStorage.removeItem('ql_active_batch_id');
+    }
+  }, [activeBatchId]);
+
   // --- Auto-Refresh Google Sheets (DISABLED to avoid rate limits) ---
   // Users can manually refresh using the Refresh button
   /*
   useEffect(() => {
     if (!activeBatchId || !serviceAccountCredentials) return;
-
+  
     const batch = batches.find(b => b.id === activeBatchId);
     if (!batch || batch.source !== 'google-sheets' || !batch.googleSheetsConfig) return;
-
+  
     const intervalId = setInterval(async () => {
       console.log('Auto-refreshing Google Sheets...');
       try {
@@ -107,16 +215,16 @@ const App: React.FC = () => {
             serviceAccountCredentials
           );
         }
-
+  
         const { headers, data } = sheetsData;
         const pk = batch.primaryKeyColumn;
-
+  
         // Validate records
         const validRecords = data.filter(row => {
           const pkValue = row[pk];
           return pkValue !== undefined && pkValue !== null && String(pkValue).trim() !== '';
         });
-
+  
         if (validRecords.length > 0) {
           setBatches(prev => prev.map(b => {
             if (b.id === activeBatchId) {
@@ -125,7 +233,7 @@ const App: React.FC = () => {
               // However, for immediate UI updates, we might want to preserve local state if sync is pending.
               // For simplicity and correctness with "sheet as source of truth", we rebuild records.
               // But we need to check if the sheet has "Scanned" column.
-
+  
               const newRecords = validRecords.map(row => {
                 // Check if row has "Scanned" column from sheet
                 const isScanned = row['Scanned'] === 'YES';
@@ -136,7 +244,7 @@ const App: React.FC = () => {
                   sheetName: row._sheetName || sheetsData.sheetName
                 };
               });
-
+  
               return { ...b, records: newRecords };
             }
             return b;
@@ -147,7 +255,7 @@ const App: React.FC = () => {
         console.error('Auto-refresh failed:', err);
       }
     }, 60000); // 60 seconds
-
+  
     return () => clearInterval(intervalId);
   }, [activeBatchId, batches, serviceAccountCredentials]);
   */
@@ -479,41 +587,43 @@ const App: React.FC = () => {
     const recordIndex = batch.records.findIndex(r => r.id === trackingNum);
 
     if (recordIndex >= 0) {
-      // Update scanned status locally
-      const updatedBatches = batches.map(b => {
-        if (b.id === activeBatchId) {
-          const newRecords = [...b.records];
-          newRecords[recordIndex] = { ...newRecords[recordIndex], scanned: true, scannedAt: new Date().toISOString() };
-          return { ...b, records: newRecords };
-        }
-        return b;
-      });
-      setBatches(updatedBatches);
+      const record = batch.records[recordIndex];
 
-      // Sync to Google Sheets is DISABLED to avoid rate limits
-      // Scans are cached locally and synced when user clicks Refresh button
-      /*
-      if (batch.source === 'google-sheets' && batch.googleSheetsConfig && serviceAccountCredentials) {
-        try {
-          await updateScanStatus(
-            batch.googleSheetsConfig.spreadsheetId,
-            batch.records[recordIndex].sheetName || batch.googleSheetsConfig.sheetName || '',
-            recordIndex,
-            true,
-            serviceAccountCredentials,
-            'ScannedAt',
-            trackingNum, // orderId
-            batch.primaryKeyColumn // primaryKeyColumn
-          );
-          console.log(`已同步扫描状态到 Google Sheets: ${trackingNum}`);
-        } catch (err: any) {
-          console.error(`同步到 Google Sheets 失败: ${err.message}`);
-          // Don't block scanning if sync fails
+      const scannedAt = new Date().toISOString();
+      if (syncMode === 'client') {
+        // CLIENT MODE: Send scan to host
+        console.log('Sending scan to host:', trackingNum);
+        window.electronAPI?.sendClientScan({
+          batchId: batch.id,
+          trackingNumber: trackingNum,
+          scannedAt,
+          scannerName: 'Client'
+        });
+      } else {
+        // HOST or STANDALONE
+        // Update scanned status locally
+        const updatedBatches = batches.map(b => {
+          if (b.id === activeBatchId) {
+            const newRecords = [...b.records];
+            newRecords[recordIndex] = { ...newRecords[recordIndex], scanned: true, scannedAt };
+            return { ...b, records: newRecords };
+          }
+          return b;
+        });
+        setBatches(updatedBatches);
+
+        // HOST: Broadcast
+        if (syncMode === 'host') {
+          window.electronAPI?.broadcastScan({
+            batchId: batch.id,
+            trackingNumber: trackingNum,
+            scannedAt,
+            scannerName: 'Host'
+          });
         }
       }
-      */
 
-      return batch.records[recordIndex];
+      return { ...batch.records[recordIndex], scanned: true, scannedAt };
     }
 
     return null;
@@ -602,19 +712,26 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {isLoading && (
-        <div className="p-12 text-center text-gray-500 bg-white rounded-xl border border-gray-200 animate-pulse">
-          Parsing file...
-        </div>
-      )}
 
-      {!isLoading && batches.length === 0 && (
-        <div className="text-center py-20 bg-white rounded-2xl border border-dashed border-gray-300">
-          <FileSpreadsheet size={48} className="mx-auto text-gray-300 mb-4" />
-          <p className="text-gray-500 font-medium">No batches found</p>
-          <p className="text-gray-400 text-sm">Upload an Excel file to get started</p>
-        </div>
-      )}
+      <SyncPanel onModeChange={setSyncMode} />
+
+      {
+        isLoading && (
+          <div className="p-12 text-center text-gray-500 bg-white rounded-xl border border-gray-200 animate-pulse">
+            Parsing file...
+          </div>
+        )
+      }
+
+      {
+        !isLoading && batches.length === 0 && (
+          <div className="text-center py-20 bg-white rounded-2xl border border-dashed border-gray-300">
+            <FileSpreadsheet size={48} className="mx-auto text-gray-300 mb-4" />
+            <p className="text-gray-500 font-medium">No batches found</p>
+            <p className="text-gray-400 text-sm">Upload an Excel file to get started</p>
+          </div>
+        )
+      }
 
       <div className="grid gap-4">
         {batches.map(batch => {
@@ -705,7 +822,7 @@ const App: React.FC = () => {
           );
         })}
       </div>
-    </div>
+    </div >
   );
 
   const renderRules = () => (

@@ -90,9 +90,28 @@ declare global {
       fetchGoogleSheets: (params: { spreadsheetId: string; sheetName: string; credentials: any }) => Promise<any>;
       fetchAllGoogleSheets: (params: { spreadsheetId: string; credentials: any }) => Promise<any>;
       updateScanStatus: (params: { spreadsheetId: string; sheetName: string; rowIndex: number; scanned: boolean; credentials: any; scannedColumnName?: string }) => Promise<{ success: boolean }>;
-      batchUpdateScanStatus: (params: any) => Promise<any>;
       onSyncBeforeClose: (callback: () => void) => void;
       sendSyncComplete: () => void;
+
+      // LAN Sync
+      startHost: () => Promise<{ success: boolean; ip?: string; port?: number; error?: string }>;
+      stopHost: () => Promise<void>;
+      connectToHost: (ip: string) => Promise<{ success: boolean; error?: string }>;
+      disconnectFromHost: () => Promise<void>;
+      requestSync: () => Promise<{ success: boolean; error?: string }>;
+      getLanStatus: () => Promise<{ mode: 'standalone' | 'host' | 'client'; port: number; isConnected: boolean; ip: string | null; targetIp: string }>;
+      getLocalIp: () => Promise<string>;
+      sendSyncData: (socketId: string, batches: any, activeBatchId: string | null) => void;
+      broadcastScan: (scanData: any) => void;
+      sendClientScan: (scanData: any) => void;
+
+      // Events
+      onSyncDataRequest: (callback: (socketId: string) => void) => void;
+      onRemoteScan: (callback: (data: any) => void) => void;
+      onHostConnected: (callback: () => void) => void;
+      onHostConnectionError: (callback: (err: string) => void) => void;
+      onSyncDataReceived: (callback: (data: { batches: any[]; activeBatchId: string | null }) => void) => void;
+      onRemoteScanUpdate: (callback: (data: any) => void) => void;
     };
   }
 }

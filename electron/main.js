@@ -181,7 +181,31 @@ ipcMain.on('print-label', (event, imgData) => {
 });
 
 // IPC Listener for HTML to PDF Printing (Silent)
-ipcMain.on('print-html', async (event, htmlContent) => {
+// IPC Handler: Get Printers
+ipcMain.handle('get-printers', async () => {
+  try {
+    const printers = await ptp.getPrinters();
+    return printers;
+  } catch (error) {
+    // Suppress verbose error in dev environment if no printers found or permission issue
+    // console.warn('Warning: Failed to fetch printers.');
+    return [];
+  }
+});
+
+// IPC Listener for HTML to PDF Printing (Silent)
+ipcMain.on('print-html', async (event, arg) => {
+  // Support both old (string) and new (object) formats
+  let htmlContent = '';
+  let printerName = '';
+
+  if (typeof arg === 'string') {
+    htmlContent = arg;
+  } else {
+    htmlContent = arg.htmlContent;
+    printerName = arg.printerName;
+  }
+
   let printWindow = null;
   let pdfPath = null;
 
@@ -233,11 +257,18 @@ ipcMain.on('print-html', async (event, htmlContent) => {
     printWindow = null;
 
     // 7. Print the PDF using default printer (silent)
-    await ptp.print(pdfPath, {
-      silent: true,
-      // You can specify printer name if needed: printer: 'Printer Name'
-    });
+    const printOptions = {
+      silent: true
+    };
 
+    if (printerName && printerName.trim() !== '') {
+      printOptions.printer = printerName;
+      console.log(`Printing to specific printer: ${printerName}`);
+    } else {
+      console.log('Printing to default printer');
+    }
+
+    await ptp.print(pdfPath, printOptions);
     console.log('PDF printed successfully');
 
     // 8. Wait a bit then delete the temporary PDF
@@ -448,6 +479,9 @@ ipcMain.handle('fetch-all-google-sheets', async (event, { spreadsheetId, credent
 });
 
 // IPC Handler: Update Scan Status in Google Sheets
+const LanSyncService = require('./lanSync');
+
+// IPC Handler: Update Scan Status in Google Sheets
 ipcMain.handle('update-scan-status', async (event, { spreadsheetId, sheetName, rowIndex, scanned, credentials, scannedColumnName = 'ScannedAt', orderId, primaryKeyColumn }) => {
   try {
     // 使用 GoogleAuth 创建认证实例
@@ -534,6 +568,56 @@ ipcMain.handle('update-scan-status', async (event, { spreadsheetId, sheetName, r
     console.error(`❌ 更新扫描状态失败:`, err);
     throw new Error(`更新 Google Sheets 失败: ${err.message}`);
   }
+});
+
+// === LAN SYNC IPC HANDLERS ===
+let lanSync = null;
+
+ipcMain.handle('lan-start-host', async () => {
+  if (!lanSync) lanSync = new LanSyncService(mainWindow);
+  return await lanSync.startHost();
+});
+
+ipcMain.handle('lan-stop-host', () => {
+  if (lanSync) lanSync.stopHost();
+  return { success: true };
+});
+
+ipcMain.handle('lan-connect', (event, ip) => {
+  if (!lanSync) lanSync = new LanSyncService(mainWindow);
+  return lanSync.connectToHost(ip);
+});
+
+ipcMain.handle('lan-disconnect', () => {
+  if (lanSync) lanSync.disconnectFromHost();
+  return { success: true };
+});
+
+ipcMain.on('lan-send-sync-data', (event, { socketId, batches, activeBatchId }) => {
+  if (lanSync) lanSync.sendSyncDataToClient(socketId, { batches, activeBatchId });
+});
+
+ipcMain.on('lan-broadcast-scan', (event, scanData) => {
+  if (lanSync) lanSync.broadcastScan(scanData);
+});
+
+ipcMain.on('lan-client-scan', (event, scanData) => {
+  if (lanSync) lanSync.sendScanToHost(scanData);
+});
+
+ipcMain.handle('lan-request-sync', () => {
+  if (lanSync) return lanSync.requestSync();
+  return { success: false, error: 'Service not initialized' };
+});
+
+ipcMain.handle('lan-get-status', () => {
+  if (lanSync) return lanSync.getStatus();
+  return { mode: 'standalone', isConnected: false, ip: null, port: 4000 };
+});
+
+ipcMain.handle('get-local-ip', () => {
+  const ip = require('ip');
+  return ip.address();
 });
 
 /**

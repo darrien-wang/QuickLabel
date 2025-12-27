@@ -367,9 +367,11 @@ export const Scanner: React.FC<ScannerProps> = ({
           </div>
           <div className="space-y-2">
             {history.map((rec, i) => (
-              <div key={i} className="flex items-center justify-between text-sm py-1 border-b border-gray-100 last:border-0">
+              <div key={`${rec.id}-${i}`} className="flex items-center justify-between text-sm py-1 border-b border-gray-100 last:border-0">
                 <span className="font-mono text-gray-700">{rec.id}</span>
-                <span className="text-xs text-gray-400">{new Date().toLocaleTimeString()}</span>
+                <span className="text-xs text-gray-400">
+                  {rec.scannedAt ? new Date(rec.scannedAt).toLocaleTimeString() : new Date().toLocaleTimeString()}
+                </span>
               </div>
             ))}
             {history.length === 0 && <div className="text-xs text-gray-400 italic">No history yet</div>}
