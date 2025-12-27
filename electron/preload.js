@@ -35,5 +35,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onHostConnected: (callback) => ipcRenderer.on('host-connected', callback),
   onHostConnectionError: (callback) => ipcRenderer.on('host-connection-error', (event, err) => callback(err)),
   onSyncDataReceived: (callback) => ipcRenderer.on('sync-data-received', (event, data) => callback(data)),
-  onRemoteScanUpdate: (callback) => ipcRenderer.on('remote-scan-update', (event, data) => callback(data))
+  onRemoteScanUpdate: (callback) => ipcRenderer.on('remote-scan-update', (event, data) => callback(data)),
+
+  // Updater
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  onUpdateAvailable: (callback) => ipcRenderer.on('update-available', (event, info) => callback(info)),
+  onUpdateProgress: (callback) => ipcRenderer.on('update-progress', (event, progress) => callback(progress)),
+  onUpdateDownloaded: (callback) => ipcRenderer.on('update-downloaded', (event, info) => callback(info)),
+  onUpdateError: (callback) => ipcRenderer.on('update-error', (event, err) => callback(err)),
+  onUpdateMessage: (callback) => ipcRenderer.on('update-message', (event, msg) => callback(msg))
 });

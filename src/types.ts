@@ -112,6 +112,15 @@ declare global {
       onHostConnectionError: (callback: (err: string) => void) => void;
       onSyncDataReceived: (callback: (data: { batches: any[]; activeBatchId: string | null }) => void) => void;
       onRemoteScanUpdate: (callback: (data: any) => void) => void;
+
+      // Updater
+      checkForUpdates: () => Promise<void>;
+      installUpdate: () => Promise<void>;
+      onUpdateAvailable: (callback: (info: any) => void) => void;
+      onUpdateProgress: (callback: (progress: any) => void) => void;
+      onUpdateDownloaded: (callback: (info: any) => void) => void;
+      onUpdateError: (callback: (err: string) => void) => void;
+      onUpdateMessage: (callback: (msg: string) => void) => void;
     };
   }
 }

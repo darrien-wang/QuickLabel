@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Layout, FileSpreadsheet, Settings, Printer, List, Upload, Trash2, Plus, ArrowRight, Download, Link as LinkIcon } from 'lucide-react';
+import { Layout, FileSpreadsheet, Settings, Printer, List, Upload, Trash2, Plus, ArrowRight, Download, Link as LinkIcon, RefreshCcw } from 'lucide-react';
 import { parseExcelFile, exportUnscannedRecords } from './services/excelService';
 import { fetchGoogleSheetsData, fetchAllGoogleSheetsData, parseGoogleSheetsUrl, ServiceAccountCredentials, updateScanStatus, batchUpdateScanStatus } from './services/googleSheetsService';
 import { Batch, BatchRecord, Rule, ConditionOperator, LabelFieldMapping } from './types';
@@ -43,6 +43,12 @@ const App: React.FC = () => {
   const [showFieldMappingModal, setShowFieldMappingModal] = useState(false);
   const [fieldMappingBatchId, setFieldMappingBatchId] = useState<string | null>(null);
   const [syncMode, setSyncMode] = useState<'standalone' | 'host' | 'client'>('standalone');
+  const [updateStatus, setUpdateStatus] = useState<{
+    type: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'error';
+    message?: string;
+    progress?: number;
+    version?: string;
+  }>({ type: 'idle' });
 
   // --- Effects ---
   useEffect(() => {
@@ -70,6 +76,30 @@ const App: React.FC = () => {
       };
 
       window.electronAPI.onSyncBeforeClose(handleSyncBeforeClose);
+    }
+
+    // --- Auto Updater Listeners ---
+    if (window.electronAPI) {
+      window.electronAPI.onUpdateMessage((msg) => {
+        console.log('Update Message:', msg);
+      });
+
+      window.electronAPI.onUpdateAvailable((info) => {
+        setUpdateStatus({ type: 'available', version: info.version });
+      });
+
+      window.electronAPI.onUpdateProgress((progress) => {
+        setUpdateStatus(prev => ({ ...prev, type: 'downloading', progress: progress.percent }));
+      });
+
+      window.electronAPI.onUpdateDownloaded((info) => {
+        setUpdateStatus({ type: 'downloaded', version: info.version });
+      });
+
+      window.electronAPI.onUpdateError((err) => {
+        setUpdateStatus({ type: 'error', message: err });
+        setTimeout(() => setUpdateStatus({ type: 'idle' }), 5000);
+      });
     }
 
   }, []);
@@ -903,6 +933,38 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-gray-50 text-slate-900">
+      {/* Update Notification Bar */}
+      {updateStatus.type !== 'idle' && updateStatus.type !== 'checking' && (
+        <div className={`fixed bottom-0 left-0 right-0 z-50 p-3 flex items-center justify-between text-white shadow-2xl transition-all ${updateStatus.type === 'error' ? 'bg-red-600' : 'bg-blue-600'}`}>
+          <div className="flex items-center gap-3 px-4">
+            <RefreshCcw size={20} className={updateStatus.type === 'downloading' ? 'animate-spin' : ''} />
+            <div className="flex flex-col">
+              <span className="font-bold text-sm">
+                {updateStatus.type === 'available' && `New Version Available (${updateStatus.version})`}
+                {updateStatus.type === 'downloading' && `Downloading Update... ${Math.round(updateStatus.progress || 0)}%`}
+                {updateStatus.type === 'downloaded' && `Update Ready to Install! (v${updateStatus.version})`}
+                {updateStatus.type === 'error' && `Update Error: ${updateStatus.message}`}
+              </span>
+              {updateStatus.type === 'downloaded' && <span className="text-xs opacity-90">Please restart the app to apply the update.</span>}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 pr-4">
+            {updateStatus.type === 'downloaded' ? (
+              <button
+                onClick={() => window.electronAPI?.installUpdate()}
+                className="bg-white text-blue-600 px-4 py-1.5 rounded-lg font-bold text-sm hover:bg-blue-50 transition-colors shadow-md"
+              >
+                Restart & Install
+              </button>
+            ) : updateStatus.type === 'error' ? (
+              <button onClick={() => setUpdateStatus({ type: 'idle' })} className="text-white opacity-80 hover:opacity-100">
+                <Trash2 size={20} />
+              </button>
+            ) : null}
+          </div>
+        </div>
+      )}
+
       {/* Sidebar */}
       <nav className="w-20 bg-slate-900 flex flex-col items-center py-6 gap-8 z-50 print:hidden shadow-xl">
         <div className="w-10 h-10 bg-blue-500 rounded-xl flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-blue-500/50">

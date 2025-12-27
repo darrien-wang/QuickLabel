@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const ptp = require('pdf-to-printer');
 const { google } = require('googleapis');
+const { autoUpdater } = require('electron-updater');
 
 let mainWindow;
 
@@ -29,6 +30,11 @@ function createWindow() {
   } else {
     // In production, load the built index.html
     mainWindow.loadFile(path.join(__dirname, '../build/index.html'));
+
+    // Check for updates on startup in production
+    setTimeout(() => {
+      autoUpdater.checkForUpdatesAndNotify();
+    }, 3000);
   }
 
   // Handle window close event - prompt to save if there are pending changes
@@ -644,4 +650,33 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
+});
+
+// --- Auto Updater Logic ---
+autoUpdater.on('checking-for-update', () => {
+  if (mainWindow) mainWindow.webContents.send('update-message', 'Checking for update...');
+});
+autoUpdater.on('update-available', (info) => {
+  if (mainWindow) mainWindow.webContents.send('update-available', info);
+});
+autoUpdater.on('update-not-available', (info) => {
+  if (mainWindow) mainWindow.webContents.send('update-message', 'Update not available.');
+});
+autoUpdater.on('error', (err) => {
+  if (mainWindow) mainWindow.webContents.send('update-error', err.message);
+});
+autoUpdater.on('download-progress', (progressObj) => {
+  if (mainWindow) mainWindow.webContents.send('update-progress', progressObj);
+});
+autoUpdater.on('update-downloaded', (info) => {
+  if (mainWindow) mainWindow.webContents.send('update-downloaded', info);
+});
+
+// IPC for manual update trigger
+ipcMain.handle('check-for-updates', () => {
+  return autoUpdater.checkForUpdatesAndNotify();
+});
+
+ipcMain.handle('install-update', () => {
+  autoUpdater.quitAndInstall();
 });

@@ -20,6 +20,13 @@
     "directories": {
       "buildResources": "public"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "darrien-wang",
+        "repo": "QuickLabel"
+      }
+    ],
     "extraMetadata": {
       "main": "electron/main.js"
     }
