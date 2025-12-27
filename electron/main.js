@@ -30,6 +30,93 @@ function createWindow() {
     // In production, load the built index.html
     mainWindow.loadFile(path.join(__dirname, '../build/index.html'));
   }
+
+  // Handle window close event - prompt to save if there are pending changes
+  mainWindow.on('close', async (event) => {
+    // Prevent default close behavior
+    event.preventDefault();
+
+    // Ask renderer process if there are pending changes
+    const response = await mainWindow.webContents.executeJavaScript(`
+      (function() {
+        // Check if there are any Google Sheets batches with scanned records
+        const batches = JSON.parse(localStorage.getItem('ql_batches') || '[]');
+        const googleSheetsBatches = batches.filter(b => b.source === 'google-sheets');
+        const hasScannedRecords = googleSheetsBatches.some(b => 
+          b.records && b.records.some(r => r.scanned)
+        );
+        return hasScannedRecords;
+      })()
+    `);
+
+    // Helper function to clear all scan statuses
+    const clearScanCache = async () => {
+      await mainWindow.webContents.executeJavaScript(`
+        (function() {
+          // Clear all scan statuses from batches
+          const batches = JSON.parse(localStorage.getItem('ql_batches') || '[]');
+          const clearedBatches = batches.map(b => ({
+            ...b,
+            records: b.records.map(r => ({ ...r, scanned: false, scannedAt: undefined }))
+          }));
+          localStorage.setItem('ql_batches', JSON.stringify(clearedBatches));
+          console.log('Scan cache cleared');
+        })()
+      `);
+    };
+
+    if (response) {
+      // Show dialog asking if user wants to save
+      const { dialog } = require('electron');
+      const choice = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['保存并退出', '不保存退出', '取消'],
+        defaultId: 0,
+        title: '保存扫描结果',
+        message: '您有未同步到 Google Sheets 的扫描记录',
+        detail: '是否要在退出前同步到 Google Sheets？\n\n注意：关闭应用后，扫描缓存将被清空。'
+      });
+
+      if (choice.response === 0) {
+        // User chose to save - trigger sync, then clear cache and close
+        mainWindow.webContents.send('sync-before-close');
+
+        // Wait for sync completion event
+        const syncCompleteHandler = async () => {
+          await clearScanCache();
+          mainWindow.destroy();
+        };
+
+        // Listen for sync completion (with timeout fallback)
+        ipcMain.once('sync-complete', syncCompleteHandler);
+
+        // Fallback: close after 30 seconds if sync doesn't complete
+        setTimeout(async () => {
+          ipcMain.removeListener('sync-complete', syncCompleteHandler);
+          await clearScanCache();
+          mainWindow.destroy();
+        }, 30000);
+      } else if (choice.response === 1) {
+        // User chose not to save - clear cache and close immediately
+        await mainWindow.webContents.executeJavaScript(`
+          (function() {
+            // Clear all scan statuses from batches
+            const batches = JSON.parse(localStorage.getItem('ql_batches') || '[]');
+            const clearedBatches = batches.map(b => ({
+              ...b,
+              records: b.records.map(r => ({ ...r, scanned: false, scannedAt: undefined }))
+            }));
+            localStorage.setItem('ql_batches', JSON.stringify(clearedBatches));
+          })()
+        `);
+        mainWindow.destroy();
+      }
+      // If choice.response === 2 (Cancel), do nothing (window stays open)
+    } else {
+      // No pending changes, close immediately
+      mainWindow.destroy();
+    }
+  });
 }
 
 // IPC Listener for Printing
@@ -156,7 +243,7 @@ ipcMain.on('print-html', async (event, htmlContent) => {
     // 8. Wait a bit then delete the temporary PDF
     setTimeout(() => {
       try {
-        if (fs.existsSync(pdfPath)) {
+        if (pdfPath && fs.existsSync(pdfPath)) {
           fs.unlinkSync(pdfPath);
           console.log(`Temporary PDF deleted: ${pdfPath}`);
         }
@@ -167,7 +254,6 @@ ipcMain.on('print-html', async (event, htmlContent) => {
 
   } catch (error) {
     console.error('PDF Print failed:', error);
-
     // Cleanup on error
     if (printWindow && !printWindow.isDestroyed()) {
       printWindow.close();

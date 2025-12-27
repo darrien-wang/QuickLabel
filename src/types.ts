@@ -85,10 +85,14 @@ declare global {
   interface Window {
     electronAPI?: {
       printLabel: (imgData: string) => void;
-      printHTML: (htmlContent: string) => void;
+      printHTML: (htmlContent: string, printerName?: string) => void;
+      getPrinters: () => Promise<any[]>;
       fetchGoogleSheets: (params: { spreadsheetId: string; sheetName: string; credentials: any }) => Promise<any>;
       fetchAllGoogleSheets: (params: { spreadsheetId: string; credentials: any }) => Promise<any>;
       updateScanStatus: (params: { spreadsheetId: string; sheetName: string; rowIndex: number; scanned: boolean; credentials: any; scannedColumnName?: string }) => Promise<{ success: boolean }>;
+      batchUpdateScanStatus: (params: any) => Promise<any>;
+      onSyncBeforeClose: (callback: () => void) => void;
+      sendSyncComplete: () => void;
     };
   }
 }

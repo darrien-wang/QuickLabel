@@ -118,3 +118,33 @@ export const updateScanStatus = async (
     throw new Error(`更新 Google Sheets 失败: ${err.message}`);
   }
 };
+
+/**
+ * Batch update scan status in Google Sheets
+ * Updates multiple rows in one API call
+ */
+export const batchUpdateScanStatus = async (
+  spreadsheetId: string,
+  sheetName: string,
+  updates: Array<{ orderId: string; primaryKeyColumn: string }>,
+  credentials: ServiceAccountCredentials
+): Promise<{ success: boolean; updated: number }> => {
+  if (!window.electronAPI?.batchUpdateScanStatus) {
+    throw new Error('Electron API not available. This feature only works in the Electron app.');
+  }
+
+  try {
+    const result = await window.electronAPI.batchUpdateScanStatus({
+      spreadsheetId,
+      sheetName,
+      updates,
+      credentials
+    });
+
+    console.log(`✅ 批量同步成功: ${result.updated} 条记录`);
+    return result;
+  } catch (err: any) {
+    console.error(`❌ 批量更新失败:`, err);
+    throw new Error(`批量更新 Google Sheets 失败: ${err.message}`);
+  }
+};

@@ -15,6 +15,13 @@ interface ScannerProps {
   rawData?: Record<string, any>[];
 }
 
+interface PrintTask {
+  internalId: string;
+  record: BatchRecord;
+  status: 'pending' | 'processing';
+  timestamp: number;
+}
+
 export const Scanner: React.FC<ScannerProps> = ({
   activeBatch,
   rules,
@@ -30,25 +37,119 @@ export const Scanner: React.FC<ScannerProps> = ({
   const [lastRecord, setLastRecord] = useState<BatchRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<BatchRecord[]>([]);
-  const [isPrinting, setIsPrinting] = useState(false);
+
+  // Print Queue State
+  const [printQueue, setPrintQueue] = useState<PrintTask[]>([]);
+
+  // Printer Selection State
+  const [printers, setPrinters] = useState<any[]>([]);
+  const [selectedPrinter, setSelectedPrinter] = useState<string>('');
 
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Focus input on mount and after operations
   useEffect(() => {
-    inputRef.current?.focus();
+    const timer = setTimeout(() => {
+      inputRef.current?.focus();
+    }, 100);
+    return () => clearTimeout(timer);
   }, [lastRecord, error]);
+
+  // Load Printers and Restore Selection
+  useEffect(() => {
+    const loadPrinters = async () => {
+      // Small delay to ensure Electron API is ready
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      if (window.electronAPI?.getPrinters) {
+        try {
+          const printerList = await window.electronAPI.getPrinters();
+          if (printerList && printerList.length > 0) {
+            setPrinters(printerList);
+
+            // Try to restore saved printer
+            const savedPrinter = localStorage.getItem('ql_selected_printer');
+            if (savedPrinter && printerList.some((p: any) => p.name === savedPrinter)) {
+              setSelectedPrinter(savedPrinter);
+            } else {
+              const defaultP = printerList.find((p: any) => p.isDefault);
+              if (defaultP) setSelectedPrinter(defaultP.name);
+              else setSelectedPrinter(printerList[0].name);
+            }
+          } else {
+            // No printers found
+            setPrinters([{ name: 'System Default', isDefault: true }]);
+          }
+        } catch (err) {
+          console.error("Failed to load printers:", err);
+          // Fallback
+          setPrinters([{ name: 'System Default', isDefault: true }]);
+        }
+      } else {
+        // API missing (likely needs restart)
+        console.warn("getPrinters not found");
+        setPrinters([{ name: 'System Default', isDefault: true }]);
+      }
+    };
+    loadPrinters();
+  }, []);
+
+  // Save Printer Selection
+  useEffect(() => {
+    if (selectedPrinter) {
+      localStorage.setItem('ql_selected_printer', selectedPrinter);
+    }
+  }, [selectedPrinter]);
 
   // Handle auto-print when lastRecord updates
   useEffect(() => {
     if (autoPrint && lastRecord) {
-      // Small timeout to allow React to render the new label to the DOM (for preview)
-      const timer = setTimeout(() => {
-        handlePrint();
-      }, 300);
-      return () => clearTimeout(timer);
+      addToPrintQueue(lastRecord);
     }
   }, [lastRecord, autoPrint]);
+
+  // --- Print Queue Processor ---
+  useEffect(() => {
+    const processQueue = async () => {
+      // Find the next pending task
+      const nextTask = printQueue.find(t => t.status === 'pending');
+
+      // If no pending task, or if something is already processing, do nothing
+      if (!nextTask || printQueue.some(t => t.status === 'processing')) {
+        return;
+      }
+
+      // 1. Mark as processing
+      setPrintQueue(prev => prev.map(t =>
+        t.internalId === nextTask.internalId ? { ...t, status: 'processing' } : t
+      ));
+
+      try {
+        // 2. Wait a bit for React to render the hidden label and useEffect hooks (Barcode/QR) to run
+        await new Promise(resolve => setTimeout(resolve, 800));
+
+        // 3. Execute Print
+        await executePrint(nextTask.internalId, nextTask.record);
+      } catch (err) {
+        console.error("Queue Print Failed:", err);
+      } finally {
+        // 4. Remove from queue regardless of success/failure
+        setPrintQueue(prev => prev.filter(t => t.internalId !== nextTask.internalId));
+      }
+    };
+
+    processQueue();
+  }, [printQueue]);
+
+  const addToPrintQueue = (record: BatchRecord) => {
+    const newTask: PrintTask = {
+      internalId: crypto.randomUUID(),
+      record: record,
+      status: 'pending',
+      timestamp: Date.now()
+    };
+    setPrintQueue(prev => [...prev, newTask]);
+  };
 
   const handleScan = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,7 +167,7 @@ export const Scanner: React.FC<ScannerProps> = ({
       setLastRecord(result);
       setHistory(prev => [result, ...prev].slice(0, 10)); // Keep last 10
       setInputVal('');
-      // Printing is handled by useEffect
+      // Auto-print is handled by useEffect
     } else {
       setError(`Tracking number "${inputVal}" not found in batch.`);
       setLastRecord(null);
@@ -75,21 +176,15 @@ export const Scanner: React.FC<ScannerProps> = ({
   };
 
   /**
-   * ELECTRON SILENT PRINTING METHOD
-   * 1. Copies the raw HTML of the label.
-   * 2. Converts canvas elements (QR codes) to images.
-   * 3. Sends complete HTML to Electron main process for silent printing.
+   * Actual Print Logic
+   * Scrapes the DOM of the specific hidden label by ID
    */
-  const handlePrint = async () => {
-    if (!lastRecord || isPrinting) return;
-
-    setIsPrinting(true);
-
+  const executePrint = async (elementId: string, record: BatchRecord) => {
     try {
-      // 1. Get the source element (The rendered label on screen)
-      const sourceElement = document.getElementById('preview-label');
+      // 1. Get the source element (The rendered label from the hidden queue area)
+      const sourceElement = document.getElementById(`print-task-${elementId}`);
       if (!sourceElement) {
-        throw new Error("Label source not found");
+        throw new Error(`Label source element not found: ${elementId}`);
       }
 
       // 2. Clone the node so we can manipulate it without affecting the UI
@@ -115,12 +210,11 @@ export const Scanner: React.FC<ScannerProps> = ({
         }
       });
 
-      // 4. Remove the scale transform from the clone for printing
-      // We want the printer to print the 100mm x 150mm div naturally
+      // 4. Remove styles for printing
       clonedNode.style.transform = 'none';
-      clonedNode.style.border = 'none'; // Remove preview border
+      clonedNode.style.border = 'none';
       clonedNode.style.margin = '0';
-      clonedNode.classList.remove('shadow-xl'); // Remove shadow
+      clonedNode.classList.remove('shadow-xl');
 
       // 5. Build complete HTML document
       const htmlContent = `
@@ -128,52 +222,24 @@ export const Scanner: React.FC<ScannerProps> = ({
             <html>
             <head>
                 <meta charset="UTF-8">
-                <title>Print Label ${lastRecord.id}</title>
+                <title>Print Label ${record.id}</title>
                 <script src="https://cdn.tailwindcss.com"></script>
                 <style>
-                    * {
-                        box-sizing: border-box;
-                    }
-
-                    /* CRITICAL: Force the printer to use 100mm x 150mm paper size */
-                    @page {
-                        size: 100mm 150mm;
-                        margin: 0;
-                    }
-
+                    * { box-sizing: border-box; }
+                    @page { size: 100mm 150mm; margin: 0; }
                     html, body {
-                        margin: 0;
-                        padding: 0;
-                        width: 100mm;
-                        height: 150mm;
+                        margin: 0; padding: 0;
+                        width: 100mm; height: 150mm;
                         -webkit-print-color-adjust: exact;
                         print-color-adjust: exact;
                         color-adjust: exact;
                     }
-
                     #print-root {
                         width: 100mm !important;
                         height: 150mm !important;
                         overflow: hidden;
-                        position: relative;
                     }
-
-                    /* Ensure SVG barcodes are black */
-                    svg {
-                        fill: black !important;
-                    }
-
-                    /* Force print styles */
-                    @media print {
-                        html, body {
-                            width: 100mm;
-                            height: 150mm;
-                        }
-                        #print-root {
-                            width: 100mm !important;
-                            height: 150mm !important;
-                        }
-                    }
+                    svg { fill: black !important; }
                 </style>
             </head>
             <body>
@@ -186,60 +252,37 @@ export const Scanner: React.FC<ScannerProps> = ({
 
       // 6. Check if Electron API is available
       if (window.electronAPI && window.electronAPI.printHTML) {
-        // Use Electron's silent printing (HTML -> PDF -> Print -> Delete)
-        window.electronAPI.printHTML(htmlContent);
-
-        // Cleanup after waiting for PDF generation and print to complete
-        // (2s HTML load + 1s PDF generation + 1s print + buffer)
-        setTimeout(() => {
-          setIsPrinting(false);
-          inputRef.current?.focus();
-        }, 5000);
+        // Pass selected printer logic
+        // If selectedPrinter is "System Default", pass empty string or undefined to use default
+        const printerName = selectedPrinter === 'System Default' ? '' : selectedPrinter;
+        window.electronAPI.printHTML(htmlContent, printerName);
       } else {
-        // Fallback to browser print dialog (for web version or debugging)
-        console.warn("Electron API not available, falling back to browser print");
-        const iframe = document.createElement('iframe');
-        iframe.style.position = 'fixed';
-        iframe.style.right = '0';
-        iframe.style.bottom = '0';
-        iframe.style.width = '0';
-        iframe.style.height = '0';
-        iframe.style.border = '0';
-        document.body.appendChild(iframe);
-
-        const doc = iframe.contentWindow?.document;
-        if (!doc) throw new Error("Iframe document inaccessible");
-
-        doc.open();
-        doc.write(htmlContent);
-        doc.close();
-
-        iframe.onload = () => {
-          setTimeout(() => {
-            const win = iframe.contentWindow;
-            if (win) {
-              win.focus();
-              win.print();
-            }
-
-            setTimeout(() => {
-              document.body.removeChild(iframe);
-              setIsPrinting(false);
-              inputRef.current?.focus();
-            }, 1000);
-          }, 500);
-        };
+        console.warn("Electron API not available");
       }
-
     } catch (err) {
-      console.error("Print failed", err);
-      setIsPrinting(false);
-      alert("Printing failed. Please check console.");
+      console.error("Print execution failed", err);
     }
   };
 
   return (
     <div className="flex h-full gap-6 p-6">
+
+      {/* --- Hidden Print Queue Renderer --- */}
+      {/* This area renders labels for the print queue off-screen so they can be captured */}
+      <div style={{ position: 'absolute', left: '-9999px', top: 0, opacity: 0, pointerEvents: 'none' }}>
+        {printQueue.map((task) => (
+          <div key={task.internalId} id={`print-task-${task.internalId}`}>
+            <LabelRenderer
+              record={task.record}
+              rules={rules}
+              scale={1} // Always print at 100% scale
+              fieldMapping={fieldMapping}
+              rawData={rawData}
+            />
+          </div>
+        ))}
+      </div>
+
       {/* Left Column: Input & Status */}
       <div className="flex-1 flex flex-col gap-6 max-w-xl">
 
@@ -278,6 +321,19 @@ export const Scanner: React.FC<ScannerProps> = ({
             )}
           </div>
         </div>
+
+        {/* Print Queue Status (Optional Visual Indicator) */}
+        {printQueue.length > 0 && (
+          <div className="bg-blue-50 border border-blue-100 p-3 rounded-xl flex items-center justify-between text-blue-800 text-sm">
+            <div className="flex items-center gap-2">
+              <RefreshCcw size={16} className="animate-spin" />
+              <span className="font-bold">Printing in progress...</span>
+            </div>
+            <span className="bg-blue-200 px-2 py-0.5 rounded text-xs font-mono">
+              Queue: {printQueue.length}
+            </span>
+          </div>
+        )}
 
         {/* Info Card */}
         {lastRecord ? (
@@ -325,19 +381,40 @@ export const Scanner: React.FC<ScannerProps> = ({
       <div className="flex-1 bg-gray-200 rounded-2xl p-8 flex flex-col items-center justify-center relative overflow-hidden">
 
         {/* Top Controls */}
-        <div className="absolute top-4 right-4 flex gap-2 z-10">
+        <div className="absolute top-4 right-4 flex gap-2 z-10 w-full px-4 justify-between pointer-events-none">
+          {/* Left Side: Printer Selection */}
+          <div className="pointer-events-auto bg-white rounded-lg shadow-md p-1 flex items-center gap-2">
+            <span className="text-xs font-bold text-gray-500 px-2 flex items-center gap-1">
+              <Printer size={12} />
+              PRINTER
+            </span>
+            <select
+              value={selectedPrinter}
+              onChange={(e) => setSelectedPrinter(e.target.value)}
+              className="text-sm border-0 focus:ring-0 bg-transparent py-1 pr-8 font-medium max-w-[200px] truncate cursor-pointer"
+            >
+              {printers.length === 0 && <option value="">Loading...</option>}
+              {printers.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.name} {p.isDefault ? '(Default)' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Right Side: Print Button */}
           <button
-            onClick={handlePrint}
-            disabled={!lastRecord || isPrinting}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium shadow-md flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            onClick={() => lastRecord && addToPrintQueue(lastRecord)}
+            disabled={!lastRecord}
+            className="pointer-events-auto bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium shadow-md flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            {isPrinting ? <RefreshCcw size={18} className="animate-spin" /> : <Printer size={18} />}
-            Print Now
+            <Printer size={18} />
+            <span>Print Now</span>
           </button>
         </div>
 
         {/* Scale Control */}
-        <div className="absolute top-4 left-4 bg-white rounded-lg shadow-md p-3 min-w-[200px] z-10">
+        <div className="absolute top-16 left-4 bg-white rounded-lg shadow-md p-3 min-w-[200px] z-10">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-bold text-gray-600">View Scale</span>
             <span className="text-xs font-mono text-blue-600">{Math.round(labelScale * 100)}%</span>
@@ -367,9 +444,8 @@ export const Scanner: React.FC<ScannerProps> = ({
           </div>
         </div>
 
-        {/* The Label Preview - Used as Source for Printing */}
-        {/* The transform affects visual size, but handlePrint clones the inner content and strips transform */}
-        <div className="shadow-2xl bg-white">
+        {/* The Label Preview (Visual Only) */}
+        <div className="shadow-2xl bg-white mt-12 bg-white">
           <LabelRenderer
             id="preview-label"
             record={lastRecord}

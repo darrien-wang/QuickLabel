@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Layout, FileSpreadsheet, Settings, Printer, List, Upload, Trash2, Plus, ArrowRight, Download, Link as LinkIcon } from 'lucide-react';
 import { parseExcelFile, exportUnscannedRecords } from './services/excelService';
-import { fetchGoogleSheetsData, fetchAllGoogleSheetsData, parseGoogleSheetsUrl, ServiceAccountCredentials, updateScanStatus } from './services/googleSheetsService';
+import { fetchGoogleSheetsData, fetchAllGoogleSheetsData, parseGoogleSheetsUrl, ServiceAccountCredentials, updateScanStatus, batchUpdateScanStatus } from './services/googleSheetsService';
 import { Batch, BatchRecord, Rule, ConditionOperator, LabelFieldMapping } from './types';
 import { Scanner } from './components/Scanner';
 import { GoogleSheetsImportForm } from './components/GoogleSheetsImportForm';
@@ -50,6 +50,21 @@ const App: React.FC = () => {
     if (savedBatches) setBatches(JSON.parse(savedBatches));
     if (savedRules) setRules(JSON.parse(savedRules));
     if (savedServiceAccount) setServiceAccountCredentials(JSON.parse(savedServiceAccount));
+
+    // Listen for sync-before-close event from Electron
+    if (window.electronAPI?.onSyncBeforeClose) {
+      const handleSyncBeforeClose = async () => {
+        console.log('Received sync-before-close event, syncing all Google Sheets batches...');
+        await syncAllGoogleSheetsBatches();
+        // Notify Electron that sync is complete
+        if (window.electronAPI?.sendSyncComplete) {
+          window.electronAPI.sendSyncComplete();
+          console.log('Sync complete event sent');
+        }
+      };
+
+      window.electronAPI.onSyncBeforeClose(handleSyncBeforeClose);
+    }
   }, []);
 
   useEffect(() => {
@@ -67,7 +82,9 @@ const App: React.FC = () => {
     }
   }, [serviceAccountCredentials]);
 
-  // --- Auto-Refresh Google Sheets ---
+  // --- Auto-Refresh Google Sheets (DISABLED to avoid rate limits) ---
+  // Users can manually refresh using the Refresh button
+  /*
   useEffect(() => {
     if (!activeBatchId || !serviceAccountCredentials) return;
 
@@ -133,6 +150,7 @@ const App: React.FC = () => {
 
     return () => clearInterval(intervalId);
   }, [activeBatchId, batches, serviceAccountCredentials]);
+  */
 
   // --- Handlers ---
   const processFile = async (file: File) => {
@@ -228,6 +246,50 @@ const App: React.FC = () => {
     exportUnscannedRecords(unscannedRecords, batch.name);
   };
 
+  const syncAllGoogleSheetsBatches = async () => {
+    if (!serviceAccountCredentials) return;
+
+    const googleSheetsBatches = batches.filter(b =>
+      b.source === 'google-sheets' && b.googleSheetsConfig
+    );
+
+    for (const batch of googleSheetsBatches) {
+      const scannedRecords = batch.records.filter(r => r.scanned);
+
+      if (scannedRecords.length > 0) {
+        console.log(`Syncing ${scannedRecords.length} records from batch ${batch.name}...`);
+
+        // Group records by sheet name for batch update
+        const recordsBySheet = scannedRecords.reduce((acc, record) => {
+          const sheet = record.sheetName || batch.googleSheetsConfig!.sheetName || '';
+          if (!acc[sheet]) acc[sheet] = [];
+          acc[sheet].push({
+            orderId: record.id,
+            primaryKeyColumn: batch.primaryKeyColumn
+          });
+          return acc;
+        }, {} as Record<string, Array<{ orderId: string; primaryKeyColumn: string }>>);
+
+        // Batch update for each sheet
+        for (const [sheetName, updates] of Object.entries(recordsBySheet)) {
+          try {
+            const result = await batchUpdateScanStatus(
+              batch.googleSheetsConfig!.spreadsheetId,
+              sheetName,
+              updates,
+              serviceAccountCredentials
+            );
+            console.log(`✅ Sheet "${sheetName}": ${result.updated} records synced`);
+          } catch (err: any) {
+            console.error(`❌ Failed to sync sheet "${sheetName}":`, err.message);
+          }
+        }
+      }
+    }
+
+    console.log('All batches synced');
+  };
+
   const handleRefreshGoogleSheets = async (batchId: string) => {
     const batch = batches.find(b => b.id === batchId);
     if (!batch || batch.source !== 'google-sheets' || !batch.googleSheetsConfig || !serviceAccountCredentials) {
@@ -237,6 +299,37 @@ const App: React.FC = () => {
 
     setIsLoading(true);
     try {
+      // Step 1: Sync all pending scan statuses to Google Sheets
+      console.log('Syncing pending scan statuses to Google Sheets...');
+      const scannedRecords = batch.records.filter(r => r.scanned);
+
+      if (scannedRecords.length > 0) {
+        console.log(`Found ${scannedRecords.length} scanned records to sync`);
+
+        for (const record of scannedRecords) {
+          try {
+            const recordIndex = batch.records.findIndex(r => r.id === record.id);
+            await updateScanStatus(
+              batch.googleSheetsConfig.spreadsheetId,
+              record.sheetName || batch.googleSheetsConfig.sheetName || '',
+              recordIndex,
+              true,
+              serviceAccountCredentials,
+              'ScannedAt',
+              record.id, // orderId
+              batch.primaryKeyColumn // primaryKeyColumn
+            );
+            console.log(`Synced: ${record.id}`);
+          } catch (err: any) {
+            console.error(`Failed to sync ${record.id}:`, err.message);
+            // Continue with other records even if one fails
+          }
+        }
+
+        console.log('Batch sync complete');
+      }
+
+      // Step 2: Fetch fresh data from Google Sheets
       let sheetsData;
       if (batch.googleSheetsConfig.importAllSheets) {
         sheetsData = await fetchAllGoogleSheetsData(
@@ -268,11 +361,11 @@ const App: React.FC = () => {
               scanned: !!row['ScannedAt'],
               sheetName: row._sheetName || sheetsData.sheetName
             }));
-            return { ...b, records: newRecords };
+            return { ...b, records: newRecords, rawData: data };
           }
           return b;
         }));
-        alert('刷新成功！');
+        alert('同步并刷新成功！');
       }
     } catch (err: any) {
       alert(`刷新失败: ${err.message}`);
@@ -397,7 +490,9 @@ const App: React.FC = () => {
       });
       setBatches(updatedBatches);
 
-      // Sync to Google Sheets if this is a Google Sheets batch
+      // Sync to Google Sheets is DISABLED to avoid rate limits
+      // Scans are cached locally and synced when user clicks Refresh button
+      /*
       if (batch.source === 'google-sheets' && batch.googleSheetsConfig && serviceAccountCredentials) {
         try {
           await updateScanStatus(
@@ -416,6 +511,7 @@ const App: React.FC = () => {
           // Don't block scanning if sync fails
         }
       }
+      */
 
       return batch.records[recordIndex];
     }
